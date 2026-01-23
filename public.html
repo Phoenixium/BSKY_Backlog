@@ -1,0 +1,1590 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bluesky Feed Viewer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h1 style="margin: 0;">🦋 Bluesky Feed</h1>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <button id="darkModeToggle" onclick="app.toggleDarkMode()" 
+                        style="padding: 8px 12px; background-color: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; color: white; cursor: pointer; font-size: 13px; min-width: 40px;" title="Toggle dark mode">🌙</button>
+                    <button id="menuToggle" onclick="app.toggleMenu()" 
+                        style="padding: 8px 12px; background-color: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; color: white; cursor: pointer; font-size: 13px;" title="More options">⋯</button>
+                    <div id="dropdownMenu" style="display: none; position: absolute; top: 50px; right: 10px; background: rgba(0,0,0,0.8); border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; z-index: 100; min-width: 150px;">
+                        <button onclick="app.clearCache()" style="display: block; width: 100%; text-align: left; padding: 10px 12px; background: none; border: none; color: white; cursor: pointer; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.1);">🗑️ Clear Cache</button>
+                    </div>
+                    <div id="authSection" style="display: none; gap: 8px; align-items: center;">
+                        <span id="loggedInUser" style="color: white; font-weight: 500; font-size: 13px;"></span>
+                        <button id="logoutBtn" onclick="app.logout()"
+                            style="padding: 8px 12px; background-color: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; color: white; cursor: pointer; font-size: 13px;">Logout</button>
+                    </div>
+                    <button id="loginBtn" onclick="app.showLoginModal()"
+                        style="padding: 8px 12px; background-color: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; color: white; cursor: pointer; font-size: 13px;">Login</button>
+                </div>
+            </div>
+            <div class="input-group">
+                <input type="text" id="handleInput" placeholder="Enter Bluesky handle (e.g., user.bsky.social)"
+                    value="">
+                <button id="loadBtn" onclick="app.loadFeed()">Load Feed</button>
+            </div>
+            <div class="date-group">
+                <div class="date-input-wrapper">
+                    <label for="startDateInput">Start:</label>
+                    <input type="datetime-local" id="startDateInput">
+                </div>
+                <div class="date-input-wrapper">
+                    <label for="endDateInput">End:</label>
+                    <input type="datetime-local" id="endDateInput">
+                </div>
+                <div class="date-input-wrapper">
+                    <label for="filterSelect">Filter:</label>
+                    <select id="filterSelect">
+                        <option value="posts_with_replies">Posts & Replies</option>
+                        <option value="posts_no_replies">Posts Only</option>
+                        <option value="posts_with_media">Posts with Media</option>
+                        <option value="posts_and_author_threads">Posts & Threads</option>
+                        <option value="posts_with_video">Posts with Video</option>
+                    </select>
+                </div>
+            </div>
+            <div class="date-group">
+                <div class="date-input-wrapper sort-wrapper">
+                    <label for="sortSelect">Sort:</label>
+                    <select id="sortSelect" onchange="app.setSortOrder(this.value)">
+                        <option value="ascending">⬆️ Oldest First</option>
+                        <option value="descending">⬇️ Newest First</option>
+                    </select>
+                </div>
+            </div>
+            <div class="status-info" id="statusInfo">
+                Enter a handle and click Load Feed to begin
+            </div>
+        </header>
+
+        <div id="feedStats" class="feed-stats" style="display: none;">
+            <span id="feedStatsText"></span>
+            <button class="scroll-to-top-btn" onclick="app.scrollToTop()" title="Scroll to top">⬆️ Top</button>
+        </div>
+        <div id="feed"></div>
+        <div id="sentinel">↓ Scroll to load more posts ↓</div>
+
+        <!-- Login Modal -->
+        <div id="loginModal"
+            style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.7); z-index: 1000;"
+            class="login-modal">
+            <div style="background: white; padding: 30px; border-radius: 8px; max-width: 400px; width: 90%;">
+                <h2 style="margin-bottom: 20px; color: #333;">Login to Bluesky</h2>
+                <p style="font-size: 13px; color: #657786; margin-bottom: 15px;">⚠️ This app does NOT store your
+                    password. Your credentials are used only to create a secure session token.</p>
+                <div style="margin-bottom: 15px;">
+                    <label
+                        style="display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; color: #333;">Handle
+                        or Email:</label>
+                    <input type="text" id="loginHandle" placeholder="user.bsky.social or email@example.com"
+                        style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box; color: black;">
+                </div>
+                <div style="margin-bottom: 20px;">
+                    <label
+                        style="display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; color: #333;">App
+                        Password:</label>
+                    <input type="password" id="loginPassword" placeholder="(not your account password)"
+                        style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box;">
+                    <p style="font-size: 12px; color: #657786; margin-top: 5px;">Get one from <a
+                            href="https://bsky.app/settings/app-passwords" target="_blank"
+                            style="color: #1185fe; text-decoration: none;">Bluesky Settings</a></p>
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button onclick="app.attemptLogin()"
+                        style="flex: 1; padding: 10px; background-color: #1185fe; border: none; border-radius: 4px; color: white; font-weight: 600; cursor: pointer;">Login</button>
+                    <button onclick="app.hideLoginModal()"
+                        style="flex: 1; padding: 10px; background-color: #e8e8e8; border: none; border-radius: 4px; color: #333; font-weight: 600; cursor: pointer;">Cancel</button>
+                </div>
+                <div id="loginError" style="color: #e74c3c; font-size: 13px; margin-top: 10px; display: none;"></div>
+            </div>
+        </div>
+
+        <!-- Image Modal -->
+        <div id="imageModal" class="image-modal">
+            <div class="image-modal-content">
+                <button class="image-modal-close" onclick="app.closeImageModal()">&times;</button>
+                <button id="imagePrevBtn" class="image-modal-nav image-modal-prev" onclick="app.previousImage()" style="display:none;">❮</button>
+                <img id="modalImage" src="" alt="Full size image" />
+                <button id="imageNextBtn" class="image-modal-nav image-modal-next" onclick="app.nextImage()" style="display:none;">❯</button>
+                <div id="imageCounter" class="image-counter" style="display:none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'https://public.api.bsky.app/xrpc';
+
+        class BskyFeedApp {
+            constructor() {
+                this.followedAccounts = [];
+                this.feedCursors = new Map();
+                this.allPosts = [];
+                this.isLoading = false;
+                this.currentHandle = null;
+                this.displayedCount = 0;
+                this.postsPerPage = 50;
+                this.sortOrder = localStorage.getItem('sortOrder') || 'ascending'; // Restore from localStorage
+                // Authentication
+                this.authToken = null;
+                this.userDid = null;
+                this.userHandle = null;
+                this.refreshToken = null;
+                this.refreshInterval = null;
+                this.likedPosts = new Map();
+                this.repostedPosts = new Map();
+                this.setupIntersectionObserver();
+                this.initializeCacheManager();
+                this.cache.init(); // Initialize IndexedDB
+                this.setDefaultDateValues();
+                this.checkExistingSession();
+                this.restoreSortOrderUI();
+                this.restoreDarkMode();
+            }
+
+            setDefaultDateValues() {
+                // Set default date values to today at 00:00 in local timezone
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+
+                // Format as YYYY-MM-DDTHH:mm for local datetime (not UTC)
+                const year = today.getFullYear();
+                const month = String(today.getMonth() + 1).padStart(2, '0');
+                const day = String(today.getDate()).padStart(2, '0');
+                const hours = String(today.getHours()).padStart(2, '0');
+                const minutes = String(today.getMinutes()).padStart(2, '0');
+
+                const dateString = `${year}-${month}-${day}T${hours}:${minutes}`;
+
+                const startInput = document.getElementById('startDateInput');
+                const endInput = document.getElementById('endDateInput');
+
+                if (startInput) startInput.value = dateString;
+                if (endInput) endInput.value = dateString;
+            }
+
+            initializeCacheManager() {
+                this.cache = {
+                    db: null,
+                    dbName: 'BskyFeedCache',
+                    storeName: 'cache',
+
+                    init: async () => {
+                        return new Promise((resolve, reject) => {
+                            const request = indexedDB.open(this.cache.dbName, 1);
+
+                            request.onerror = () => reject(request.error);
+                            request.onsuccess = () => {
+                                this.cache.db = request.result;
+                                resolve();
+                            };
+
+                            request.onupgradeneeded = (event) => {
+                                const db = event.target.result;
+                                if (!db.objectStoreNames.contains(this.cache.storeName)) {
+                                    db.createObjectStore(this.cache.storeName, { keyPath: 'key' });
+                                }
+                            };
+                        });
+                    },
+
+                    set: async (key, value, ttl = 3600000) => {
+                        if (!this.cache.db) await this.cache.init();
+                        return new Promise((resolve, reject) => {
+                            const transaction = this.cache.db.transaction([this.cache.storeName], 'readwrite');
+                            const store = transaction.objectStore(this.cache.storeName);
+                            store.put({
+                                key,
+                                data: value,
+                                timestamp: Date.now(),
+                                ttl
+                            });
+                            transaction.oncomplete = resolve;
+                            transaction.onerror = () => reject(transaction.error);
+                        });
+                    },
+
+                    get: async (key) => {
+                        if (!this.cache.db) await this.cache.init();
+                        return new Promise((resolve, reject) => {
+                            const transaction = this.cache.db.transaction([this.cache.storeName], 'readonly');
+                            const store = transaction.objectStore(this.cache.storeName);
+                            const request = store.get(key);
+
+                            request.onsuccess = () => {
+                                const cached = request.result;
+                                if (!cached) {
+                                    resolve(null);
+                                    return;
+                                }
+
+                                if (Date.now() - cached.timestamp > cached.ttl) {
+                                    this.cache.delete(key);
+                                    resolve(null);
+                                } else {
+                                    resolve(cached.data);
+                                }
+                            };
+                            request.onerror = () => reject(request.error);
+                        });
+                    },
+
+                    delete: async (key) => {
+                        if (!this.cache.db) await this.cache.init();
+                        return new Promise((resolve, reject) => {
+                            const transaction = this.cache.db.transaction([this.cache.storeName], 'readwrite');
+                            const store = transaction.objectStore(this.cache.storeName);
+                            store.delete(key);
+                            transaction.oncomplete = resolve;
+                            transaction.onerror = () => reject(transaction.error);
+                        });
+                    },
+
+                    clear: async () => {
+                        if (!this.cache.db) await this.cache.init();
+                        return new Promise((resolve, reject) => {
+                            const transaction = this.cache.db.transaction([this.cache.storeName], 'readwrite');
+                            const store = transaction.objectStore(this.cache.storeName);
+                            store.clear();
+                            transaction.oncomplete = resolve;
+                            transaction.onerror = () => reject(transaction.error);
+                        });
+                    }
+                };
+            }
+
+            setupIntersectionObserver() {
+                const options = {
+                    root: null,
+                    rootMargin: '1200px',
+                    threshold: 0
+                };
+
+                const observer = new IntersectionObserver((entries) => {
+                    if (entries[0].isIntersecting && !this.isLoading && this.allPosts.length > 0) {
+                        this.loadNextPage();
+                    }
+                }, options);
+
+                setTimeout(() => {
+                    const sentinel = document.getElementById('sentinel');
+                    if (sentinel) observer.observe(sentinel);
+                }, 100);
+            }
+
+            updateStatus(message) {
+                document.getElementById('statusInfo').textContent = message;
+            }
+
+            async checkExistingSession() {
+                const token = await this.cache.get('auth:token');
+                const did = await this.cache.get('auth:did');
+                const handle = await this.cache.get('auth:handle');
+                const refreshToken = await this.cache.get('auth:refresh');
+
+                if (token && did && handle && refreshToken) {
+                    this.authToken = token;
+                    this.userDid = did;
+                    this.userHandle = handle;
+                    this.refreshToken = refreshToken;
+                    this.updateAuthUI();
+                    this.setupTokenRefresh();
+                }
+            }
+
+            updateAuthUI() {
+                const loginBtn = document.getElementById('loginBtn');
+                const authSection = document.getElementById('authSection');
+                const loggedInUser = document.getElementById('loggedInUser');
+
+                if (this.authToken) {
+                    loginBtn.style.display = 'none';
+                    authSection.style.display = 'block';
+                    loggedInUser.textContent = `👤 ${this.userHandle}`;
+                } else {
+                    loginBtn.style.display = 'block';
+                    authSection.style.display = 'none';
+                }
+            }
+
+            setupTokenRefresh() {
+                // Refresh token every 90 minutes (before 2-hour expiry)
+                if (this.refreshInterval) {
+                    clearInterval(this.refreshInterval);
+                }
+
+                this.refreshInterval = setInterval(() => {
+                    this.refreshAuthToken();
+                }, 90 * 60 * 1000);
+
+                console.log('✅ Token refresh scheduled for every 90 minutes');
+            }
+
+            async refreshAuthToken() {
+                if (!this.refreshToken) {
+                    console.warn('No refresh token available');
+                    return;
+                }
+
+                try {
+                    const apiUrl = window.location.hostname === 'localhost'
+                        ? 'http://localhost:3000/bsky_backlog/backend.php'
+                        : `${window.location.origin}/bsky_backlog/backend.php`;
+
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            refreshJwt: this.refreshToken
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Token refresh failed');
+                    }
+
+                    const data = await response.json();
+
+                    this.authToken = data.accessJwt;
+                    if (data.refreshJwt) {
+                        this.refreshToken = data.refreshJwt;
+                    }
+
+                    // Update cache
+                    await this.cache.set('auth:token', this.authToken, 24 * 3600 * 1000);
+                    await this.cache.set('auth:refresh', this.refreshToken, 24 * 3600 * 1000);
+
+                    console.log('✅ Token refreshed successfully');
+                } catch (error) {
+                    console.error('Token refresh error:', error);
+                    // Force re-login if refresh fails
+                    this.logout();
+                    alert('Session expired. Please log in again.');
+                }
+            }
+
+            showLoginModal() {
+                document.getElementById('loginModal').style.display = 'flex';
+            }
+
+            hideLoginModal() {
+                document.getElementById('loginModal').style.display = 'none';
+                document.getElementById('loginError').style.display = 'none';
+            }
+
+            async attemptLogin() {
+                const handle = document.getElementById('loginHandle').value.trim();
+                const password = document.getElementById('loginPassword').value.trim();
+                const errorDiv = document.getElementById('loginError');
+
+                if (!handle || !password) {
+                    errorDiv.textContent = 'Please enter handle/email and app password';
+                    errorDiv.style.display = 'block';
+                    return;
+                }
+
+                try {
+                    errorDiv.style.display = 'none';
+
+                    // Use backend API endpoint
+                    const apiUrl = window.location.hostname === 'localhost'
+                        ? 'http://localhost:3000/api/login'
+                        : `${window.location.origin}/bsky_backlog/backend.php`;
+
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            identifier: handle,
+                            password: password
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Invalid credentials');
+                    }
+
+                    const data = await response.json();
+
+                    this.authToken = data.accessJwt;
+                    this.userDid = data.did;
+                    this.userHandle = data.handle;
+                    this.refreshToken = data.refreshJwt;
+
+                    // Cache session (24 hours)
+                    await this.cache.set('auth:token', this.authToken, 24 * 3600 * 1000);
+                    await this.cache.set('auth:did', this.userDid, 24 * 3600 * 1000);
+                    await this.cache.set('auth:handle', this.userHandle, 24 * 3600 * 1000);
+                    await this.cache.set('auth:refresh', this.refreshToken, 24 * 3600 * 1000);
+
+                    this.updateAuthUI();
+                    this.hideLoginModal();
+                    this.setupTokenRefresh();
+
+                    // Clear login fields
+                    document.getElementById('loginHandle').value = '';
+                    document.getElementById('loginPassword').value = '';
+                } catch (error) {
+                    errorDiv.textContent = `Login failed: ${error.message}`;
+                    errorDiv.style.display = 'block';
+                }
+            }
+
+            async logout() {
+                if (this.refreshInterval) {
+                    clearInterval(this.refreshInterval);
+                    this.refreshInterval = null;
+                }
+
+                this.authToken = null;
+                this.refreshToken = null;
+                this.userDid = null;
+                this.userHandle = null;
+                this.likedPosts.clear();
+                this.repostedPosts.clear();
+
+                await this.cache.delete('auth:token');
+                await this.cache.delete('auth:did');
+                await this.cache.delete('auth:handle');
+                await this.cache.delete('auth:refresh');
+
+                this.updateAuthUI();
+                // Don't re-render the feed, just update UI to remove auth-only buttons
+                // The current posts remain visible but like/repost buttons will be disabled
+            }
+
+            updateFeedStats() {
+                const stats = document.getElementById('feedStats');
+                const statsText = document.getElementById('feedStatsText');
+                if (this.followedAccounts.length > 0) {
+                    statsText.textContent = `👥 Following ${this.followedAccounts.length} accounts | 📮 Collected ${this.allPosts.length} posts | 👀 Displaying ${this.displayedCount} posts`;
+                    stats.style.display = 'flex';
+                } else {
+                    stats.style.display = 'none';
+                }
+            }
+
+            restoreSortOrderUI() {
+                const sortSelect = document.getElementById('sortSelect');
+                if (sortSelect) {
+                    sortSelect.value = this.sortOrder;
+                }
+            }
+
+            setSortOrder(order) {
+                this.sortOrder = order;
+                localStorage.setItem('sortOrder', order);
+                this.displayedCount = 0;
+                document.getElementById('feed').innerHTML = '';
+                this.renderPage();
+            }
+
+            toggleMenu() {
+                const menu = document.getElementById('dropdownMenu');
+                menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+                
+                // Close menu when clicking elsewhere
+                document.addEventListener('click', (e) => {
+                    if (e.target.id !== 'menuToggle' && e.target.closest('#dropdownMenu') === null) {
+                        menu.style.display = 'none';
+                    }
+                });
+            }
+
+            scrollToTop() {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+
+            async clearCache() {
+                try {
+                    // Clear the cache store
+                    await this.cache.clear();
+                    
+                    // Delete the entire database
+                    await new Promise((resolve, reject) => {
+                        const deleteRequest = indexedDB.deleteDatabase(this.cache.dbName);
+                        deleteRequest.onsuccess = () => resolve();
+                        deleteRequest.onerror = () => reject(deleteRequest.error);
+                    });
+                    
+                    // Reinitialize database
+                    this.cache.db = null;
+                    await this.cache.init();
+                    
+                    this.updateStatus('✅ Cache cleared successfully');
+                    // Reset UI state
+                    this.followedAccounts = [];
+                    this.feedCursors = new Map();
+                    this.allPosts = [];
+                    this.displayedCount = 0;
+                    document.getElementById('feed').innerHTML = '';
+                    document.getElementById('feedStats').style.display = 'none';
+                    alert('Cache cleared! You can load a new feed.');
+                } catch (error) {
+                    console.error('Error clearing cache:', error);
+                    this.updateStatus('❌ Error clearing cache');
+                }
+            }
+
+            async loadFeed() {
+                const handle = document.getElementById('handleInput').value.trim();
+                if (!handle) {
+                    alert('Please enter a Bluesky handle');
+                    return;
+                }
+
+                this.currentHandle = handle;
+                this.followedAccounts = [];
+                this.feedCursors = new Map();
+                this.allPosts = [];
+                this.displayedCount = 0;
+
+                document.getElementById('feed').innerHTML = '';
+                document.getElementById('loadBtn').disabled = true;
+
+                try {
+                    this.updateStatus('🔍 Resolving handle...');
+
+                    // Resolve handle to DID
+                    const did = await this.resolveHandleToDid(handle);
+
+                    // Check if account requires authentication
+                    if (!this.authToken) {
+                        this.updateStatus('🔍 Checking account requirements...');
+                        
+                        // Get profile to check for authentication-only label
+                        const profileResponse = await fetch(
+                            `${API_BASE}/app.bsky.actor.getProfile?actor=${encodeURIComponent(handle)}`
+                        );
+                        
+                        if (profileResponse.ok) {
+                            const profile = await profileResponse.json();
+                            
+                            // Check if profile has the !no-unauthenticated label
+                            if (profile.labels && Array.isArray(profile.labels)) {
+                                const hasNoUnauthLabel = profile.labels.some(label => label.val === '!no-unauthenticated');
+                                if (hasNoUnauthLabel) {
+                                    this.updateStatus('❌ This account requires authentication to view');
+                                    this.showError('This account is private and requires you to be logged in to view their followers and feed.');
+                                    document.getElementById('loadBtn').disabled = false;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    this.updateStatus('👥 Fetching followed accounts...');
+                    await this.getAllFollows(did);
+
+                    if (this.followedAccounts.length === 0) {
+                        this.updateStatus('❌ No followed accounts found');
+                        return;
+                    }
+
+                    this.updateStatus(`⏳ Loading feeds from ${this.followedAccounts.length} accounts (this may take a moment)...`);
+                    await this.loadInitialFeedsProgressively();
+
+                    this.updateStatus('✅ Feed loaded! Scroll to load more.');
+                    this.renderPage();
+                } catch (error) {
+                    console.error('Error loading feed:', error);
+                    this.updateStatus(`❌ Error: ${error.message}`);
+                    this.showError(`Failed to load feed: ${error.message}`);
+                } finally {
+                    document.getElementById('loadBtn').disabled = false;
+                }
+            }
+
+            async resolveHandleToDid(handle) {
+                // Check cache first
+                const cached = await this.cache.get(`handle:${handle}`);
+                if (cached) return cached;
+
+                try {
+                    const response = await fetch(
+                        `${API_BASE}/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`
+                    );
+
+                    if (!response.ok) {
+                        throw new Error(`Handle not found: ${handle}`);
+                    }
+
+                    const data = await response.json();
+                    const did = data.did;
+
+                    // Cache for 4 hours
+                    await this.cache.set(`handle:${handle}`, did, 4 * 3600 * 1000);
+                    return did;
+                } catch (error) {
+                    throw new Error(`Failed to resolve handle: ${error.message}`);
+                }
+            }
+
+            async getAllFollows(actor) {
+                const cached = await this.cache.get(`follows:${actor}`);
+                if (cached) {
+                    this.followedAccounts = cached;
+                    return;
+                }
+
+                let cursor;
+                const follows = [];
+                const limiter = this.createRateLimiter(5);
+
+                do {
+                    await limiter.wait();
+
+                    const params = new URLSearchParams({
+                        actor,
+                        limit: 100,
+                        ...(cursor && { cursor })
+                    });
+
+                    try {
+                        const response = await fetch(
+                            `${API_BASE}/app.bsky.graph.getFollows?${params}`
+                        );
+
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+
+                        const data = await response.json();
+                        follows.push(...(data.follows || []));
+                        cursor = data.cursor;
+
+                        this.updateStatus(`👥 Fetched ${follows.length} followed accounts...`);
+                    } catch (error) {
+                        console.error(`Error fetching follows page:`, error);
+                        break;
+                    }
+                } while (cursor);
+
+                this.followedAccounts = follows;
+
+                // Cache for 4 hours
+                await this.cache.set(`follows:${actor}`, follows, 4 * 3600 * 1000);
+            }
+
+            async loadInitialFeedsProgressively() {
+                const limiter = this.createRateLimiter(5);
+                const batchSize = 20;
+
+                // Get date range from inputs
+                const startDateInput = document.getElementById('startDateInput').value;
+                const endDateInput = document.getElementById('endDateInput').value;
+                const filterSelect = document.getElementById('filterSelect').value;
+
+                const startDate = startDateInput ? new Date(startDateInput).toISOString() : null;
+                const endDate = endDateInput ? new Date(endDateInput).toISOString() : null;
+
+                // Load feeds in batches of 5 with delay between batches
+                for (let i = 0; i < this.followedAccounts.length; i += batchSize) {
+                    const batch = this.followedAccounts.slice(i, i + batchSize);
+                    const feedPromises = batch.map(account =>
+                        limiter.wait().then(() => {
+                            // Check if profile should be skipped due to authentication requirements
+                            if (!this.authToken && this.hasNoUnauthenticatedLabel(account)) {
+                                return null;
+                            }
+                            const actor = account.handle === 'handle.invalid' ? account.did : account.handle;
+                            return this.getAuthorFeedWithDateRange(actor, endDate, startDate, filterSelect);
+                        })
+                    );
+
+                    const results = await Promise.allSettled(feedPromises);
+
+                    results.forEach((result, index) => {
+                        if (result.status === 'fulfilled' && result.value) {
+                            const { feed, cursor } = result.value;
+                            if (feed && feed.length > 0) {
+                                this.allPosts.push(...feed);
+                                const storeKey = batch[index].handle === 'handle.invalid' ? batch[index].did : batch[index].handle;
+                                this.feedCursors.set(storeKey, cursor);
+                            }
+                        }
+                    });
+
+                    // Sort after each batch based on selected sort order
+                    if (this.sortOrder === 'descending') {
+                        this.allPosts.sort((a, b) =>
+                            this.getPostDate(b) - this.getPostDate(a)
+                        );
+                    } else {
+                        this.allPosts.sort((a, b) =>
+                            this.getPostDate(a) - this.getPostDate(b)
+                        );
+                    }
+
+                    this.updateFeedStats();
+                    this.updateStatus(`⏳ Loaded ${Math.min(i + batchSize, this.followedAccounts.length)}/${this.followedAccounts.length} accounts...`);
+
+                    // Small delay between batches to avoid rate limiting
+                    if (i + batchSize < this.followedAccounts.length) {
+                        await new Promise(resolve => setTimeout(resolve, 300));
+                    }
+                }
+            }
+
+            async getAuthorFeed(actor, cursor, isInitial = true, filter = 'posts_with_replies') {
+                const cacheKey = `feed:${actor}:${cursor || '0'}:${filter}`;
+                const cached = await this.cache.get(cacheKey);
+                if (cached) return cached;
+
+                try {
+                    const limit = isInitial ? 50 : 100;
+                    const params = new URLSearchParams({
+                        actor,
+                        limit: limit,
+                        filter: filter,
+                        ...(cursor && { cursor })
+                    });
+
+                    // Use authenticated endpoint if logged in
+                    const endpoint = this.authToken
+                        ? `https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed?${params}`
+                        : `${API_BASE}/app.bsky.feed.getAuthorFeed?${params}`;
+
+                    const headers = this.authToken
+                        ? { 'Authorization': `Bearer ${this.authToken}` }
+                        : {};
+
+                    const response = await fetch(endpoint, { headers });
+
+                    if (!response.ok) {
+                        console.warn(`Failed to fetch feed for ${actor}: HTTP ${response.status}`);
+                        return null;
+                    }
+
+                    const data = await response.json();
+                    const result = {
+                        feed: data.feed || [],
+                        cursor: data.cursor
+                    };
+
+                    // Cache for 15 minutes
+                    await this.cache.set(cacheKey, result, 15 * 60 * 1000);
+                    return result;
+                } catch (error) {
+                    console.warn(`Error fetching feed for ${actor}:`, error);
+                    return null;
+                }
+            }
+
+            async getAuthorFeedWithDateRange(actor, endDate, startDate, filter) {
+                let allFeed = [];
+                let cursor = endDate || undefined;
+                let isFirstRequest = true;
+
+                while (cursor) {
+                    const result = await this.getAuthorFeed(actor, cursor, isFirstRequest, filter);
+                    isFirstRequest = false;
+
+                    if (!result || !result.feed || result.feed.length === 0) {
+                        break;
+                    }
+
+                    allFeed.push(...result.feed);
+                    cursor = result.cursor;
+
+                    // Stop if cursor is before startDate
+                    if (startDate && cursor && cursor < startDate) {
+                        break;
+                    }
+
+                    // Add small delay between paginated requests to avoid rate limiting
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+
+                return {
+                    feed: allFeed,
+                    cursor: cursor
+                };
+            }
+
+            async loadNextPage() {
+                // Only render more posts from already-loaded data, don't fetch new data
+                const startDateInput = document.getElementById('startDateInput').value;
+                const startDate = startDateInput ? new Date(startDateInput).toISOString() : null;
+
+                // Filter posts to only show those after startDate
+                let filteredPosts = this.allPosts;
+                if (startDate) {
+                    filteredPosts = this.allPosts.filter(item =>
+                        this.getPostDate(item).toISOString() >= startDate
+                    );
+                }
+
+                // Check if we have more posts to display
+                if (filteredPosts.length <= this.displayedCount) {
+                    return;
+                }
+
+                this.renderPage();
+            }
+
+            renderPage() {
+                const feed = document.getElementById('feed');
+
+                // Get startDate from input
+                const startDateInput = document.getElementById('startDateInput').value;
+                const startDate = startDateInput ? new Date(startDateInput).toISOString() : null;
+
+                // Filter posts to only show those after startDate
+                let filteredPosts = this.allPosts;
+                if (startDate) {
+                    filteredPosts = this.allPosts.filter(item =>
+                        this.getPostDate(item).toISOString() >= startDate
+                    );
+                }
+
+                // Sort based on selected order
+                if (this.sortOrder === 'descending') {
+                    filteredPosts = filteredPosts.sort((a, b) =>
+                        this.getPostDate(b) - this.getPostDate(a)
+                    );
+                } else {
+                    filteredPosts = filteredPosts.sort((a, b) =>
+                        this.getPostDate(a) - this.getPostDate(b)
+                    );
+                }
+
+                const newPosts = filteredPosts.slice(this.displayedCount, this.displayedCount + this.postsPerPage);
+
+                newPosts.forEach(item => {
+                    const post = item.post;
+                    const author = post.author;
+                    const record = post.record;
+
+                    // Extract viewer data if logged in (shows if user has liked/reposted)
+                    if (this.authToken && post.viewer) {
+                        if (post.viewer.like) {
+                            this.likedPosts.set(post.uri, post.viewer.like);
+                        }
+                        if (post.viewer.repost) {
+                            this.repostedPosts.set(post.uri, post.viewer.repost);
+                        }
+                    }
+
+                    const postEl = document.createElement('div');
+                    // Add reply class if this is a reply
+                    postEl.className = (record.reply && record.reply.parent) ? 'post post-is-reply' : 'post';
+
+                    const postDate = new Date(record.createdAt);
+                    const timeAgo = this.formatTimeAgo(postDate);
+                    const fullDate = postDate.toLocaleString();
+                    const avatarInitial = author.handle.charAt(0).toUpperCase();
+                    const avatarHtml = author.avatar
+                        ? `<img src="${author.avatar}" alt="${author.handle}">`
+                        : avatarInitial;
+
+                    // Extract images from post embed (handle both direct images and recordWithMedia)
+                    let imagesHtml = '';
+                    let imagesToProcess = [];
+
+                    if (record.embed && record.embed.$type === 'app.bsky.embed.recordWithMedia' && record.embed.media && record.embed.media.images) {
+                        // recordWithMedia has images in media.images
+                        imagesToProcess = record.embed.media.images;
+                    } else if (record.embed && record.embed.images && record.embed.images.length > 0) {
+                        // Direct image embed
+                        imagesToProcess = record.embed.images;
+                    }
+
+                    if (imagesToProcess.length > 0) {
+                        imagesHtml = `<div class="post-images">`;
+                        let imageUrls = [];
+                        // First pass: collect all image URLs
+                        imagesToProcess.forEach(img => {
+                            let imageUrl = null;
+                            if (img.thumb) {
+                                imageUrl = img.thumb;
+                            } else if (img.image && img.image.ref && img.image.ref.$link) {
+                                const cid = img.image.ref.$link;
+                                imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${author.did}&cid=${cid}`;
+                            }
+                            if (imageUrl) {
+                                imageUrls.push(imageUrl);
+                            }
+                        });
+                        // Second pass: create HTML with complete imageUrls array
+                        imagesToProcess.forEach((img, index) => {
+                            let imageUrl = imageUrls[index];
+                            if (imageUrl) {
+                                const alt = img.alt || 'Post image';
+                                imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" onclick="app.openImageModal('${imageUrl.replace(/'/g, "\\'")}', ${JSON.stringify(imageUrls).replace(/"/g, '&quot;')})" />`;
+                            }
+                        });
+                        imagesHtml += '</div>';
+                    }
+
+                    // Extract video from post embed
+                    let videoHtml = '';
+                    if (record.embed && record.embed.$type === 'app.bsky.embed.video' && record.embed.video) {
+                        const video = record.embed.video;
+                        let videoUrl = null;
+
+                        if (video.ref && video.ref.$link) {
+                            const cid = video.ref.$link;
+                            videoUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${author.did}&cid=${cid}`;
+                        }
+
+                        if (videoUrl) {
+                            videoHtml = `<div class="post-video"><video controls width="100%"><source src="${videoUrl}" type="video/mp4"></video></div>`;
+                        }
+                    }
+
+                    // Check for reply and build parent post card
+                    let replyParentPostHtml = '';
+                    let replyParentAuthor, replyParentText, replyParentUri, replyParentTime, replyParentFullDate, replyParentImages = [];
+                    let replyParentStats = { likes: 0, replies: 0, reposts: 0 };
+                    let replyParentCid = '';
+
+                    if (item.reply && item.reply.parent) {
+                        const replyParent = item.reply.parent;
+                        replyParentAuthor = replyParent.author;
+                        replyParentText = replyParent.record ? this.escapeHtml(replyParent.record.text) : '';
+                        replyParentUri = replyParent.uri;
+                        replyParentCid = replyParent.cid || '';
+                        if (replyParent.record) {
+                            const parentDate = new Date(replyParent.record.createdAt);
+                            replyParentTime = this.formatTimeAgo(parentDate);
+                            replyParentFullDate = parentDate.toLocaleString();
+                        }
+
+                        // Extract stats from reply parent post
+                        replyParentStats = {
+                            likes: replyParent.likeCount || 0,
+                            replies: replyParent.replyCount || 0,
+                            reposts: replyParent.repostCount || 0
+                        };
+
+                        // Extract viewer data from reply parent post (shows if user has liked/reposted)
+                        if (this.authToken && replyParent.viewer) {
+                            if (replyParent.viewer.like) {
+                                this.likedPosts.set(replyParentUri, replyParent.viewer.like);
+                            }
+                            if (replyParent.viewer.repost) {
+                                this.repostedPosts.set(replyParentUri, replyParent.viewer.repost);
+                            }
+                        }
+
+                        // Extract images from reply parent post
+                        if (replyParent.embed && replyParent.embed.$type === 'app.bsky.embed.images#view' && replyParent.embed.images) {
+                            replyParentImages = replyParent.embed.images;
+                        } else if (replyParent.embed && replyParent.embed.$type === 'app.bsky.embed.recordWithMedia#view' && replyParent.embed.media && replyParent.embed.media.images) {
+                            replyParentImages = replyParent.embed.media.images;
+                        }
+                    }
+
+                    if (replyParentAuthor && replyParentText && replyParentUri) {
+                        const parentDisplayName = replyParentAuthor.displayName || replyParentAuthor.handle;
+                        const parentAvatarInitial = replyParentAuthor.handle.charAt(0).toUpperCase();
+                        const parentAvatarHtml = replyParentAuthor.avatar
+                            ? `<img src="${replyParentAuthor.avatar}" alt="${replyParentAuthor.handle}">`
+                            : parentAvatarInitial;
+
+                        // Build parent post images HTML
+                        let parentImagesHtml = '';
+                        if (replyParentImages.length > 0) {
+                            parentImagesHtml = '<div class="post-parent-images">';
+                            let replyImageUrls = [];
+                            // First pass: collect all image URLs
+                            replyParentImages.forEach(img => {
+                                let imageUrl = null;
+                                if (img.thumb) {
+                                    imageUrl = img.thumb;
+                                } else if (img.fullsize) {
+                                    imageUrl = img.fullsize;
+                                } else if (img.image && img.image.ref && img.image.ref.$link) {
+                                    const cid = img.image.ref.$link;
+                                    imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${replyParentAuthor.did}&cid=${cid}`;
+                                }
+                                if (imageUrl) {
+                                    replyImageUrls.push(imageUrl);
+                                }
+                            });
+                            // Second pass: create HTML with complete replyImageUrls array
+                            replyParentImages.forEach((img, index) => {
+                                let imageUrl = replyImageUrls[index];
+                                if (imageUrl) {
+                                    const alt = img.alt || 'Parent post image';
+                                    parentImagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-parent-image" onclick="app.openImageModal('${imageUrl.replace(/'/g, "\\'")}', ${JSON.stringify(replyImageUrls).replace(/"/g, '&quot;')})" />`;
+                                }
+                            });
+                            parentImagesHtml += '</div>';
+                        }
+
+                        replyParentPostHtml = `
+                                <div class="post-parent-container">
+                                    <div class="post-parent-header">
+                                        <div class="post-parent-avatar">${parentAvatarHtml}</div>
+                                        <div class="post-parent-author-info">
+                                            <div class="post-parent-author-name">
+                                                <a href="https://bsky.app/profile/${replyParentAuthor.did}" class="post-author-link" target="_blank" rel="noopener noreferrer">
+                                                    ${parentDisplayName}
+                                                </a>
+                                            </div>
+                                            <div class="post-parent-author-handle">@${replyParentAuthor.handle} · <span title="${replyParentFullDate}">${replyParentTime}</span></div>
+                                        </div>
+                                    </div>
+                                    <div class="post-parent-body">
+                                        <a href="https://bsky.app/profile/${replyParentAuthor.did}/post/${replyParentUri.split('/').pop()}" class="post-parent-link-wrapper" target="_blank" rel="noopener noreferrer">
+                                        <div class="post-parent-text">${replyParentText}</div>
+                                          </a>
+                                        ${parentImagesHtml}
+                                        ${this.generatePostStats(replyParentUri, replyParentCid, replyParentStats.replies, replyParentStats.likes, replyParentStats.reposts)}
+                                    </div>
+                                </div>
+                          
+                        `;
+                    }
+
+                    // Check for quote repost (handle both pure quotes and recordWithMedia)
+                    let parentPostHtml = '';
+                    let parentAuthor, parentText, parentUri, parentTime, parentFullDate, parentImages = [];
+                    let parentStats = { likes: 0, replies: 0, reposts: 0 };
+                    let parentCid = '';
+
+                    // Pure quote embed
+                    if (record.embed && record.embed.$type === 'app.bsky.embed.quote' && record.embed.quote) {
+                        const quote = record.embed.quote;
+                        parentAuthor = quote.author;
+                        parentText = quote.record ? this.escapeHtml(quote.record.text) : '';
+                        parentUri = quote.uri;
+                        parentCid = quote.cid || '';
+                        if (quote.record) {
+                            const parentDate = new Date(quote.record.createdAt);
+                            parentTime = this.formatTimeAgo(parentDate);
+                            parentFullDate = parentDate.toLocaleString();
+                        }
+
+                        // Extract stats from quote parent post
+                        parentStats = {
+                            likes: quote.likeCount || 0,
+                            replies: quote.replyCount || 0,
+                            reposts: quote.repostCount || 0
+                        };
+
+                        // Extract viewer data from quote parent post (shows if user has liked/reposted)
+                        if (this.authToken && quote.viewer) {
+                            if (quote.viewer.like) {
+                                this.likedPosts.set(parentUri, quote.viewer.like);
+                            }
+                            if (quote.viewer.repost) {
+                                this.repostedPosts.set(parentUri, quote.viewer.repost);
+                            }
+                        }
+
+                        // Extract images from parent post
+                        if (quote.embeds && quote.embeds.length > 0) {
+                            quote.embeds.forEach(embed => {
+                                if (embed.images) {
+                                    parentImages = embed.images;
+                                }
+                            });
+                        }
+                    }
+                    // Quote within recordWithMedia - use the VIEW structure (post.embed, not post.record.embed)
+                    else if (post.embed && post.embed.$type === 'app.bsky.embed.recordWithMedia#view' && post.embed.record && post.embed.record.record) {
+                        const viewRecord = post.embed.record.record;
+                        parentAuthor = viewRecord.author;
+                        parentText = viewRecord.value ? this.escapeHtml(viewRecord.value.text) : '';
+                        parentUri = viewRecord.uri;
+                        parentCid = viewRecord.cid || '';
+                        if (viewRecord.value) {
+                            const parentDate = new Date(viewRecord.value.createdAt);
+                            parentTime = this.formatTimeAgo(parentDate);
+                            parentFullDate = parentDate.toLocaleString();
+                        }
+
+                        // Extract stats from quote parent post
+                        parentStats = {
+                            likes: viewRecord.likeCount || 0,
+                            replies: viewRecord.replyCount || 0,
+                            reposts: viewRecord.repostCount || 0
+                        };
+
+                        // Extract viewer data from quote parent post (shows if user has liked/reposted)
+                        if (this.authToken && viewRecord.viewer) {
+                            if (viewRecord.viewer.like) {
+                                this.likedPosts.set(parentUri, viewRecord.viewer.like);
+                            }
+                            if (viewRecord.viewer.repost) {
+                                this.repostedPosts.set(parentUri, viewRecord.viewer.repost);
+                            }
+                        }
+
+                        // Extract images from parent post
+                        if (viewRecord.embeds && viewRecord.embeds.length > 0) {
+                            viewRecord.embeds.forEach(embed => {
+                                // Handle both simple image embeds and recordWithMedia embeds
+                                if (embed.images) {
+                                    parentImages = embed.images;
+                                } else if (embed.media && embed.media.images) {
+                                    parentImages = embed.media.images;
+                                }
+                            });
+                        }
+                    }
+
+                    if (parentAuthor && parentText && parentUri) {
+                        const parentDisplayName = parentAuthor.displayName || parentAuthor.handle;
+                        const parentAvatarInitial = parentAuthor.handle.charAt(0).toUpperCase();
+                        const parentAvatarHtml = parentAuthor.avatar
+                            ? `<img src="${parentAuthor.avatar}" alt="${parentAuthor.handle}">`
+                            : parentAvatarInitial;
+
+                        // Build parent post images HTML
+                        let parentImagesHtml = '';
+                        if (parentImages.length > 0) {
+                            parentImagesHtml = '<div class="post-parent-images">';
+                            let quoteImageUrls = [];
+                            // First pass: collect all image URLs
+                            parentImages.forEach(img => {
+                                let imageUrl = null;
+                                if (img.thumb) {
+                                    imageUrl = img.thumb;
+                                } else if (img.fullsize) {
+                                    imageUrl = img.fullsize;
+                                } else if (img.image && img.image.ref && img.image.ref.$link) {
+                                    const cid = img.image.ref.$link;
+                                    imageUrl = `https://bsky.social/xrpc/com.atproto.sync.getBlob?did=${parentAuthor.did}&cid=${cid}`;
+                                }
+                                if (imageUrl) {
+                                    quoteImageUrls.push(imageUrl);
+                                }
+                            });
+                            // Second pass: create HTML with complete quoteImageUrls array
+                            parentImages.forEach((img, index) => {
+                                let imageUrl = quoteImageUrls[index];
+                                if (imageUrl) {
+                                    const alt = img.alt || 'Parent post image';
+                                    parentImagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-parent-image" onclick="app.openImageModal('${imageUrl.replace(/'/g, "\\'")}', ${JSON.stringify(quoteImageUrls).replace(/"/g, '&quot;')})" />`;
+                                }
+                            });
+                            parentImagesHtml += '</div>';
+                        }
+
+                        parentPostHtml = `
+                                <div class="post-parent-container">
+                                    <div class="post-parent-header">
+                                        <div class="post-parent-avatar">${parentAvatarHtml}</div>
+                                        <div class="post-parent-author-info">
+                                            <div class="post-parent-author-name">
+                                                <a href="https://bsky.app/profile/${parentAuthor.did}" class="post-author-link" target="_blank" rel="noopener noreferrer">
+                                                    ${parentDisplayName}
+                                                </a>
+                                            </div>
+                                            <div class="post-parent-author-handle">@${parentAuthor.handle} · <span title="${parentFullDate}">${parentTime}</span></div>
+                                        </div>
+                                    </div>
+                                    <div class="post-parent-body">
+                                       <a href="https://bsky.app/profile/${parentAuthor.did}/post/${parentUri.split('/').pop()}" class="post-parent-link-wrapper" target="_blank" rel="noopener noreferrer">
+                                        <div class="post-parent-text">${parentText}</div>
+                                        </a>
+                                        ${parentImagesHtml}
+                                        ${this.generatePostStats(parentUri, parentCid, parentStats.replies, parentStats.likes, parentStats.reposts)}
+                                    </div>
+                                </div>
+                           
+                        `;
+                    }
+
+                    postEl.innerHTML = `
+                        <div class="post-header">
+                            <a href="https://bsky.app/profile/${author.did}" class="post-avatar-link" target="_blank" rel="noopener noreferrer">
+                                <div class="post-avatar">${avatarHtml}</div>
+                            </a>
+                            <div class="post-info">
+                                <div>
+                                    <a href="https://bsky.app/profile/${author.did}" class="post-author-link" target="_blank" rel="noopener noreferrer">
+                                        <span class="post-author">${author.displayName || author.handle}</span>
+                                        <span class="post-handle">@${author.handle}</span>
+                                    </a>
+                                    <span class="post-time">
+                                        <a href="https://bsky.app/profile/${author.did}/post/${post.uri.split('/').pop()}" class="post-timestamp" title="${fullDate}" target="_blank" rel="noopener noreferrer">${timeAgo}</a>
+                                        </span>
+                                </div>
+                                ${item.reason && item.reason.$type === 'app.bsky.feed.defs#reasonRepost' ? `<div class="post-repost-info">🔄 Reposted by <a href="https://bsky.app/profile/${item.reason.by.did}" class="post-repost-link" target="_blank" rel="noopener noreferrer">${item.reason.by.displayName || item.reason.by.handle}</a></div>` : ''}
+                                ${record.reply && record.reply.parent ? `<div class="post-reply-info">↩️ <span style="color: #1185fe; font-weight: 600;">Reply</span></div>` : ''}
+                            </div>
+                        </div>
+                        ${replyParentPostHtml}
+                        <a href="https://bsky.app/profile/${author.did}/post/${post.uri.split('/').pop()}" class="post-link" target="_blank" rel="noopener noreferrer">
+                            <div class="post-text">${this.escapeHtml(record.text)}</div>
+                        </a>
+                        ${imagesHtml}
+                        ${videoHtml}
+                        ${parentPostHtml}
+                        ${this.generatePostStats(post.uri, post.cid, post.replyCount, post.likeCount, post.repostCount)}
+                    `;
+
+                    feed.appendChild(postEl);
+                });
+
+                this.displayedCount += newPosts.length;
+
+                // Update stats with filtered count
+                const filteredTotal = startDate ? this.allPosts.filter(item =>
+                    this.getPostDate(item).toISOString() >= startDate
+                ).length : this.allPosts.length;
+
+                const stats = document.getElementById('feedStats');
+                const statsText = document.getElementById('feedStatsText');
+                if (this.followedAccounts.length > 0) {
+                    statsText.textContent = `👥 Following ${this.followedAccounts.length} accounts | 📮 Collected ${this.allPosts.length} posts | 📋 In range ${filteredTotal} posts | 👀 Displaying ${this.displayedCount} posts`;
+                    stats.style.display = 'flex';
+                }
+            }
+
+            formatTimeAgo(date) {
+                const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+                const minutes = Math.floor(seconds / 60);
+                const hours = Math.floor(minutes / 60);
+                const days = Math.floor(hours / 24);
+
+                if (seconds < 60) return 'now';
+                if (minutes < 60) return `${minutes}m`;
+                if (hours < 24) return `${hours}h`;
+                if (days < 7) return `${days}d`;
+
+                return date.toLocaleDateString();
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            async toggleLike(postUri, postCid) {
+                if (!this.authToken) {
+                    this.showLoginModal();
+                    return;
+                }
+
+                try {
+                    const isLiked = this.likedPosts.has(postUri);
+                    
+                    // Try to find post in allPosts (main posts), but continue if not found (might be a parent post)
+                    const post = this.allPosts.find(p => p.post.uri === postUri)?.post;
+
+                    // Update UI immediately (optimistic update)
+                    const likeButton = document.querySelector(`button[class*="post-action-button"] .like-count[data-uri="${postUri}"]`)?.parentElement;
+                    if (likeButton) {
+                        likeButton.classList.toggle('liked');
+                    }
+
+                    if (isLiked) {
+                        // Unlike - use the viewer URI from the map
+                        const likeUri = this.likedPosts.get(postUri);
+                        const rkey = likeUri.split('/').pop();
+
+                        await fetch(`https://bsky.social/xrpc/com.atproto.repo.deleteRecord`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${this.authToken}`
+                            },
+                            body: JSON.stringify({
+                                repo: this.userDid,
+                                collection: 'app.bsky.feed.like',
+                                rkey: rkey
+                            })
+                        });
+                        this.likedPosts.delete(postUri);
+                        if (post) post.likeCount = Math.max(0, (post.likeCount || 1) - 1);
+                    } else {
+                        // Like
+                        const response = await fetch(`https://bsky.social/xrpc/com.atproto.repo.createRecord`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${this.authToken}`
+                            },
+                            body: JSON.stringify({
+                                repo: this.userDid,
+                                collection: 'app.bsky.feed.like',
+                                record: {
+                                    $type: 'app.bsky.feed.like',
+                                    subject: {
+                                        uri: postUri,
+                                        cid: postCid
+                                    },
+                                    createdAt: new Date().toISOString()
+                                }
+                            })
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            this.likedPosts.set(postUri, data.uri);
+                            if (post) post.likeCount = (post.likeCount || 0) + 1;
+                        }
+                    }
+
+                    // Update count - get current count from DOM or calculate
+                    const countSpan = document.querySelector(`span.like-count[data-uri="${postUri}"]`);
+                    if (countSpan) {
+                        const currentCount = parseInt(countSpan.textContent) || 0;
+                        countSpan.textContent = isLiked ? Math.max(0, currentCount - 1) : currentCount + 1;
+                    }
+                } catch (error) {
+                    console.error('Like toggle error:', error);
+                    alert('Failed to update like');
+                    // Revert button state on error
+                    const likeButton = document.querySelector(`button[class*="post-action-button"] .like-count[data-uri="${postUri}"]`)?.parentElement;
+                    if (likeButton) {
+                        likeButton.classList.toggle('liked');
+                    }
+                }
+            }
+
+            async toggleRepost(postUri, postCid) {
+                if (!this.authToken) {
+                    this.showLoginModal();
+                    return;
+                }
+
+                try {
+                    const isReposted = this.repostedPosts.has(postUri);
+                    
+                    // Try to find post in allPosts (main posts), but continue if not found (might be a parent post)
+                    const post = this.allPosts.find(p => p.post.uri === postUri)?.post;
+
+                    // Update UI immediately (optimistic update)
+                    const repostButton = document.querySelector(`button[class*="post-action-button"] .repost-count[data-uri="${postUri}"]`)?.parentElement;
+                    if (repostButton) {
+                        repostButton.classList.toggle('reposted');
+                    }
+
+                    if (isReposted) {
+                        // Unrepost - use the viewer URI from the map
+                        const repostUri = this.repostedPosts.get(postUri);
+                        const rkey = repostUri.split('/').pop();
+
+                        await fetch(`https://bsky.social/xrpc/com.atproto.repo.deleteRecord`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${this.authToken}`
+                            },
+                            body: JSON.stringify({
+                                repo: this.userDid,
+                                collection: 'app.bsky.feed.repost',
+                                rkey: rkey
+                            })
+                        });
+                        this.repostedPosts.delete(postUri);
+                        if (post) post.repostCount = Math.max(0, (post.repostCount || 1) - 1);
+                    } else {
+                        // Repost
+                        const response = await fetch(`https://bsky.social/xrpc/com.atproto.repo.createRecord`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${this.authToken}`
+                            },
+                            body: JSON.stringify({
+                                repo: this.userDid,
+                                collection: 'app.bsky.feed.repost',
+                                record: {
+                                    $type: 'app.bsky.feed.repost',
+                                    subject: {
+                                        uri: postUri,
+                                        cid: postCid
+                                    },
+                                    createdAt: new Date().toISOString()
+                                }
+                            })
+                        });
+
+                        if (response.ok) {
+                            const data = await response.json();
+                            this.repostedPosts.set(postUri, data.uri);
+                            if (post) post.repostCount = (post.repostCount || 0) + 1;
+                        }
+                    }
+
+                    // Update count - get current count from DOM or calculate
+                    const countSpan = document.querySelector(`span.repost-count[data-uri="${postUri}"]`);
+                    if (countSpan) {
+                        const currentCount = parseInt(countSpan.textContent) || 0;
+                        countSpan.textContent = isReposted ? Math.max(0, currentCount - 1) : currentCount + 1;
+                    }
+                } catch (error) {
+                    console.error('Repost toggle error:', error);
+                    alert('Failed to update repost');
+                    // Revert button state on error
+                    const repostButton = document.querySelector(`button[class*="post-action-button"] .repost-count[data-uri="${postUri}"]`)?.parentElement;
+                    if (repostButton) {
+                        repostButton.classList.toggle('reposted');
+                    }
+                }
+            }
+
+            showError(message) {
+                const feed = document.getElementById('feed');
+                const errorEl = document.createElement('div');
+                errorEl.className = 'error';
+                errorEl.textContent = message;
+                feed.insertBefore(errorEl, feed.firstChild);
+            }
+
+            generatePostStats(postUri, postCid, replyCount, likeCount, repostCount) {
+                return `<div class="post-stats">
+                            <span class="post-stat">💬 ${replyCount || 0}</span>
+                            ${this.authToken ? `<button class="post-action-button${this.likedPosts.has(postUri) ? ' liked' : ''}" onclick="app.toggleLike('${postUri.replace(/'/g, "\\'")}', '${postCid.replace(/'/g, "\\'")}')">❤️ <span class="like-count" data-uri="${postUri}">${likeCount || 0}</span></button>` : `<span class="post-stat">❤️ ${likeCount || 0}</span>`}
+                            ${this.authToken ? `<button class="post-action-button${this.repostedPosts.has(postUri) ? ' reposted' : ''}" onclick="app.toggleRepost('${postUri.replace(/'/g, "\\'")}', '${postCid.replace(/'/g, "\\'")}')">🔄 <span class="repost-count" data-uri="${postUri}">${repostCount || 0}</span></button>` : `<span class="post-stat">🔄 ${repostCount || 0}</span>`}
+                        </div>`;
+            }
+
+            showError(message) {
+                const feed = document.getElementById('feed');
+                const errorEl = document.createElement('div');
+                errorEl.className = 'error';
+                errorEl.textContent = message;
+                feed.insertBefore(errorEl, feed.firstChild);
+            }
+
+            createRateLimiter(requestsPerSecond) {
+                const minInterval = 1000 / requestsPerSecond;
+                let lastRequestTime = 0;
+
+                return {
+                    wait: async () => {
+                        const now = Date.now();
+                        const timeSinceLastRequest = now - lastRequestTime;
+
+                        if (timeSinceLastRequest < minInterval) {
+                            await new Promise(resolve =>
+                                setTimeout(resolve, minInterval - timeSinceLastRequest)
+                            );
+                        }
+
+                        lastRequestTime = Date.now();
+                    }
+                };
+            }
+
+            getPostDate(item) {
+                // Use reason.indexedAt if available (for reposts), otherwise use record.createdAt
+                if (item.reason && item.reason.indexedAt) {
+                    return new Date(item.reason.indexedAt);
+                }
+                return new Date(item.post.record.createdAt);
+            }
+
+            hasNoUnauthenticatedLabel(account) {
+                // Check if profile has the "!no-unauthenticated" label
+                if (account.labels && Array.isArray(account.labels)) {
+                    return account.labels.some(label => label.val === '!no-unauthenticated');
+                }
+                return false;
+            }
+
+            openImageModal(imageUrl, allImages = null) {
+                const modal = document.getElementById('imageModal');
+                const modalImage = document.getElementById('modalImage');
+                const prevBtn = document.getElementById('imagePrevBtn');
+                const nextBtn = document.getElementById('imageNextBtn');
+                const counter = document.getElementById('imageCounter');
+                
+                modalImage.src = imageUrl;
+                modal.classList.add('active');
+                
+                // Store images for navigation
+                this.modalImages = allImages || [imageUrl];
+                this.currentImageIndex = this.modalImages.indexOf(imageUrl);
+                
+                // Show/hide nav buttons and counter
+                if (this.modalImages.length > 1) {
+                    prevBtn.style.display = 'flex';
+                    nextBtn.style.display = 'flex';
+                    counter.style.display = 'block';
+                    counter.textContent = `${this.currentImageIndex + 1} / ${this.modalImages.length}`;
+                } else {
+                    prevBtn.style.display = 'none';
+                    nextBtn.style.display = 'none';
+                    counter.style.display = 'none';
+                }
+                
+                // Close modal when clicking outside the image
+                modal.onclick = (e) => {
+                    if (e.target === modal) {
+                        this.closeImageModal();
+                    }
+                };
+            }
+
+            previousImage() {
+                if (this.modalImages && this.modalImages.length > 1) {
+                    this.currentImageIndex = (this.currentImageIndex - 1 + this.modalImages.length) % this.modalImages.length;
+                    this.updateModalImage();
+                }
+            }
+
+            nextImage() {
+                if (this.modalImages && this.modalImages.length > 1) {
+                    this.currentImageIndex = (this.currentImageIndex + 1) % this.modalImages.length;
+                    this.updateModalImage();
+                }
+            }
+
+            updateModalImage() {
+                const modalImage = document.getElementById('modalImage');
+                const counter = document.getElementById('imageCounter');
+                modalImage.src = this.modalImages[this.currentImageIndex];
+                counter.textContent = `${this.currentImageIndex + 1} / ${this.modalImages.length}`;
+            }
+
+            closeImageModal() {
+                const modal = document.getElementById('imageModal');
+                modal.classList.remove('active');
+            }
+
+            toggleDarkMode() {
+                const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark';
+                const newMode = isDarkMode ? 'light' : 'dark';
+                document.documentElement.setAttribute('data-theme', newMode);
+                localStorage.setItem('theme', newMode);
+                this.updateDarkModeButton();
+            }
+
+            restoreDarkMode() {
+                const savedTheme = localStorage.getItem('theme') || 'light';
+                document.documentElement.setAttribute('data-theme', savedTheme);
+                this.updateDarkModeButton();
+            }
+
+            updateDarkModeButton() {
+                const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark';
+                const button = document.getElementById('darkModeToggle');
+                if (button) {
+                    button.textContent = isDarkMode ? '☀️' : '🌙';
+                    button.title = isDarkMode ? 'Switch to light mode' : 'Switch to dark mode';
+                }
+            }
+        }
+
+        // Initialize app
+        const app = new BskyFeedApp();
+    </script>
+</body>
+
+</html>
