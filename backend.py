@@ -3,6 +3,11 @@ import json
 import urllib.request
 import urllib.error
 from urllib.parse import urlparse
+from datetime import datetime
+
+def get_timestamp():
+    """Get formatted timestamp for logging"""
+    return datetime.now().strftime('%H:%M:%S.%f')[:-3]
 
 class CORSRequestHandler(BaseHTTPRequestHandler):
     
@@ -40,7 +45,8 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         """Handle login requests"""
         try:
             data = json.loads(body)
-            print(f"📨 Login attempt for: {data.get('identifier')}")
+            ts = get_timestamp()
+            print(f"[{ts}] 📨 Login attempt for: {data.get('identifier')}")
             
             # Forward to Bluesky API
             req = urllib.request.Request(
@@ -57,7 +63,8 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             try:
                 with urllib.request.urlopen(req, timeout=10) as response:
                     result = json.loads(response.read())
-                    print(f"✅ Login successful for: {result.get('handle')}")
+                    ts = get_timestamp()
+                    print(f"[{ts}] ✅ Login successful for: {result.get('handle')}")
                     
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
@@ -67,13 +74,14 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                     
             except urllib.error.HTTPError as e:
                 # Read the error response from Bluesky
+                ts = get_timestamp()
                 try:
                     error_body = e.read().decode('utf-8')
                     error_data = json.loads(error_body)
-                    print(f"❌ Bluesky returned error {e.code}: {error_data}")
+                    print(f"[{ts}] ❌ Bluesky returned error {e.code}: {error_data}")
                 except:
                     error_data = {'error': f'HTTP {e.code}: {e.reason}', 'reason': e.reason}
-                    print(f"❌ HTTP Error {e.code}: {e.reason}")
+                    print(f"[{ts}] ❌ HTTP Error {e.code}: {e.reason}")
                 
                 self.send_response(e.code)
                 self.send_header('Content-Type', 'application/json')
@@ -94,8 +102,10 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
         try:
             data = json.loads(body)
             refresh_jwt = data.get('refreshJwt')
+            ts = get_timestamp()
             
             if not refresh_jwt:
+                print(f"[{ts}] ⚠️ Refresh attempt without token")
                 self.send_response(400)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -103,7 +113,7 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'error': 'No refresh token provided'}).encode('utf-8'))
                 return
             
-            print(f"🔄 Refreshing token...")
+            print(f"[{ts}] 🔄 Refreshing token...")
             
             req = urllib.request.Request(
                 'https://bsky.social/xrpc/com.atproto.server.refreshSession',
@@ -114,7 +124,8 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
             try:
                 with urllib.request.urlopen(req, timeout=10) as response:
                     result = json.loads(response.read())
-                    print(f"✅ Token refreshed successfully")
+                    ts = get_timestamp()
+                    print(f"[{ts}] ✅ Token refreshed successfully")
                     
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
@@ -123,13 +134,14 @@ class CORSRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps(result).encode('utf-8'))
                     
             except urllib.error.HTTPError as e:
+                ts = get_timestamp()
                 try:
                     error_body = e.read().decode('utf-8')
                     error_data = json.loads(error_body)
-                    print(f"❌ Refresh failed {e.code}: {error_data}")
+                    print(f"[{ts}] ❌ Refresh failed {e.code}: {error_data}")
                 except:
                     error_data = {'error': f'HTTP {e.code}: {e.reason}'}
-                    print(f"❌ Refresh failed {e.code}: {e.reason}")
+                    print(f"[{ts}] ❌ Refresh failed {e.code}: {e.reason}")
                 
                 self.send_response(e.code)
                 self.send_header('Content-Type', 'application/json')
