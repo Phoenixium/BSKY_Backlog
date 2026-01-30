@@ -954,3 +954,49 @@ button:disabled {
 [data-theme="dark"] #loginError {
     color: #f85149 !important;
 }
+
+/* External link card styling */
+.post-external-link {
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.post-external-link img {
+    width: 100%;
+    display: block;
+}
+
+.post-external-link-info {
+    padding: 10px;
+    background: #f5f5f5;
+}
+
+.post-external-link-title {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 4px;
+    color: #333;
+}
+
+.post-external-link-domain {
+    font-size: 12px;
+    color: #657786;
+}
+
+[data-theme="dark"] .post-external-link {
+    border-color: #30363d;
+}
+
+[data-theme="dark"] .post-external-link-info {
+    background: #1c2128;
+}
+
+[data-theme="dark"] .post-external-link-title {
+    color: #e4e6eb;
+}
+
+[data-theme="dark"] .post-external-link-domain {
+    color: #8b949e;
+}

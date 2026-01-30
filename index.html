@@ -19,7 +19,10 @@
                     <button id="menuToggle" onclick="app.toggleMenu()" 
                         style="padding: 8px 12px; background-color: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; color: white; cursor: pointer; font-size: 13px;" title="More options">⋯</button>
                     <div id="dropdownMenu" style="display: none; position: absolute; top: 50px; right: 10px; background: rgba(0,0,0,0.8); border: 1px solid rgba(255,255,255,0.3); border-radius: 4px; z-index: 100; min-width: 150px;">
+                        <button onclick="app.toggleImagePreloading()" style="display: block; width: 100%; text-align: left; padding: 10px 12px; background: none; border: none; color: white; cursor: pointer; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.1);" id="preloadToggleBtn">✓ Image Preload</button>
                         <button onclick="app.clearCache()" style="display: block; width: 100%; text-align: left; padding: 10px 12px; background: none; border: none; color: white; cursor: pointer; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.1);">🗑️ Clear Cache</button>
+                        <button onclick="app.showLoadPostModal()" style="display: block; width: 100%; text-align: left; padding: 10px 12px; background: none; border: none; color: white; cursor: pointer; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.1);">🔗 Debug: Load Post</button>
+                        <button onclick="app.showLoadAuthorFeedModal()" style="display: block; width: 100%; text-align: left; padding: 10px 12px; background: none; border: none; color: white; cursor: pointer; font-size: 13px;">👤 Debug: Load Author Feed</button>
                     </div>
                     <div id="authSection" style="display: none; gap: 8px; align-items: center;">
                         <span id="loggedInUser" style="color: white; font-weight: 500; font-size: 13px;"></span>
@@ -121,6 +124,48 @@
                 <div id="imageCounter" class="image-counter" style="display:none;"></div>
             </div>
         </div>
+
+        <!-- Debug: Load Post Modal -->
+        <div id="loadPostModal"
+            style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.7); z-index: 1000;"
+            class="debug-modal">
+            <div style="background: white; padding: 30px; border-radius: 8px; max-width: 400px; width: 90%;">
+                <h2 style="margin-bottom: 20px; color: #333;">Debug: Load Single Post</h2>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; color: #333;">Post URL or ID:</label>
+                    <input type="text" id="postUrlInput" placeholder="e.g., at://did:plc:.../app.bsky.feed.post/123abc or direct URL"
+                        style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box; color: black;">
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button onclick="app.loadSinglePost()"
+                        style="flex: 1; padding: 10px; background-color: #1185fe; border: none; border-radius: 4px; color: white; font-weight: 600; cursor: pointer;">Load</button>
+                    <button onclick="app.hideLoadPostModal()"
+                        style="flex: 1; padding: 10px; background-color: #e8e8e8; border: none; border-radius: 4px; color: #333; font-weight: 600; cursor: pointer;">Cancel</button>
+                </div>
+                <div id="loadPostError" style="color: #e74c3c; font-size: 13px; margin-top: 10px; display: none;"></div>
+            </div>
+        </div>
+
+        <!-- Debug: Load Author Feed Modal -->
+        <div id="loadAuthorFeedModal"
+            style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.7); z-index: 1000;"
+            class="debug-modal">
+            <div style="background: white; padding: 30px; border-radius: 8px; max-width: 400px; width: 90%;">
+                <h2 style="margin-bottom: 20px; color: #333;">Debug: Load Author Feed</h2>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; color: #333;">Author Handle or DID:</label>
+                    <input type="text" id="authorHandleInput" placeholder="e.g., user.bsky.social or did:plc:..."
+                        style="width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; box-sizing: border-box; color: black;">
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button onclick="app.loadAuthorFeed()"
+                        style="flex: 1; padding: 10px; background-color: #1185fe; border: none; border-radius: 4px; color: white; font-weight: 600; cursor: pointer;">Load</button>
+                    <button onclick="app.hideLoadAuthorFeedModal()"
+                        style="flex: 1; padding: 10px; background-color: #e8e8e8; border: none; border-radius: 4px; color: #333; font-weight: 600; cursor: pointer;">Cancel</button>
+                </div>
+                <div id="loadAuthorFeedError" style="color: #e74c3c; font-size: 13px; margin-top: 10px; display: none;"></div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -135,7 +180,10 @@
                 this.currentHandle = null;
                 this.displayedCount = 0;
                 this.postsPerPage = 50;
-                this.sortOrder = localStorage.getItem('sortOrder') || 'ascending'; // Restore from localStorage
+                this.sortOrder = localStorage.getItem('sortOrder') || 'ascending';
+                // Caching
+                this.filteredPostsCache = null;
+                this.lastFilterParams = null;
                 // Authentication
                 this.authToken = null;
                 this.userDid = null;
@@ -144,13 +192,17 @@
                 this.refreshInterval = null;
                 this.likedPosts = new Map();
                 this.repostedPosts = new Map();
+                // Image preloading
+                this.preloadedImages = new Set();
+                this.imagePreloadingEnabled = localStorage.getItem('imagePreloadingEnabled') !== 'false'; // true by default
                 this.setupIntersectionObserver();
                 this.initializeCacheManager();
-                this.cache.init(); // Initialize IndexedDB
+                this.cache.init();
                 this.setDefaultDateValues();
                 this.checkExistingSession();
                 this.restoreSortOrderUI();
                 this.restoreDarkMode();
+                this.setupEventDelegation();
             }
 
             setDefaultDateValues() {
@@ -172,6 +224,21 @@
 
                 if (startInput) startInput.value = dateString;
                 if (endInput) endInput.value = dateString;
+            }
+
+            setupEventDelegation() {
+                // Setup is minimal now since image clicks use inline onclick handlers
+                // This can be removed or kept for future event delegation needs
+            }
+
+            getFeedCacheKey(actor, cursor, filter) {
+                return `feed:${actor}:${cursor || '0'}:${filter}`;
+            }
+
+            getFilterCacheKey() {
+                const startDateInput = document.getElementById('startDateInput').value;
+                const sortOrder = this.sortOrder;
+                return `${startDateInput}:${sortOrder}`;
             }
 
             initializeCacheManager() {
@@ -339,7 +406,7 @@
 
                 try {
                     const apiUrl = window.location.hostname === 'localhost'
-                        ? 'http://localhost:3000/bsky_backlog/backend.php'
+                        ? 'http://localhost:3000/api/refresh-token'
                         : `${window.location.origin}/bsky_backlog/backend.php`;
 
                     const response = await fetch(apiUrl, {
@@ -385,6 +452,151 @@
                 document.getElementById('loginError').style.display = 'none';
             }
 
+            showLoadPostModal() {
+                document.getElementById('loadPostModal').style.display = 'block';
+                document.getElementById('postUrlInput').value = '';
+                document.getElementById('loadPostError').style.display = 'none';
+                document.getElementById('postUrlInput').focus();
+            }
+
+            hideLoadPostModal() {
+                document.getElementById('loadPostModal').style.display = 'none';
+                document.getElementById('loadPostError').style.display = 'none';
+            }
+
+            showLoadAuthorFeedModal() {
+                document.getElementById('loadAuthorFeedModal').style.display = 'block';
+                document.getElementById('authorHandleInput').value = '';
+                document.getElementById('loadAuthorFeedError').style.display = 'none';
+                document.getElementById('authorHandleInput').focus();
+            }
+
+            hideLoadAuthorFeedModal() {
+                document.getElementById('loadAuthorFeedModal').style.display = 'none';
+                document.getElementById('loadAuthorFeedError').style.display = 'none';
+            }
+
+            async loadSinglePost() {
+                const input = document.getElementById('postUrlInput').value.trim();
+                const errorDiv = document.getElementById('loadPostError');
+
+                if (!input) {
+                    errorDiv.textContent = 'Please enter a post URL or ID';
+                    errorDiv.style.display = 'block';
+                    return;
+                }
+
+                try {
+                    errorDiv.style.display = 'none';
+                    this.updateStatus('Loading post...');
+
+                    // Parse the input to extract URI
+                    let postUri = input;
+                    if (input.startsWith('http')) {
+                        // Extract from URL like https://bsky.app/profile/did:plc:.../post/abc123
+                        const match = input.match(/profile\/([^/]+)\/post\/([^/]+)/);
+                        if (match) {
+                            postUri = `at://${match[1]}/app.bsky.feed.post/${match[2]}`;
+                        }
+                    }
+
+                    // Fetch post details
+                    const response = await fetch(`${API_BASE}/app.bsky.feed.getPostThread?uri=${encodeURIComponent(postUri)}&depth=2&height=2`, {
+                        headers: this.authToken ? { 'Authorization': `Bearer ${this.authToken}` } : {}
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Post not found');
+                    }
+
+                    const data = await response.json();
+                    const post = data.thread.post;
+
+                    // Reset feed state and display single post
+                    this.resetFeedState();
+                    this.allPosts = [{
+                        post: post,
+                        reply: data.thread.parent ? { parent: data.thread.parent.post } : null
+                    }];
+                    this.followedAccounts = [{did: post.author.did, handle: post.author.handle}];
+
+                    this.renderPage();
+                    this.hideLoadPostModal();
+                    this.updateStatus('Post loaded successfully');
+                } catch (error) {
+                    errorDiv.textContent = `Error: ${error.message}`;
+                    errorDiv.style.display = 'block';
+                    this.updateStatus(`Error loading post: ${error.message}`);
+                }
+            }
+
+            async resolveHandleToDid(handle) {
+                try {
+                    const response = await fetch(`${API_BASE}/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`);
+                    if (!response.ok) return null;
+                    const data = await response.json();
+                    return data.did;
+                } catch (error) {
+                    console.warn('Error resolving handle:', error);
+                    return null;
+                }
+            }
+
+            resetFeedState() {
+                this.displayedCount = 0;
+                this.filteredPostsCache = null;
+                this.lastFilterParams = null;
+                document.getElementById('feed').innerHTML = '';
+                document.getElementById('startDateInput').value = '';
+                document.getElementById('endDateInput').value = '';
+            }
+
+            async loadAuthorFeed() {
+                const input = document.getElementById('authorHandleInput').value.trim();
+                const errorDiv = document.getElementById('loadAuthorFeedError');
+
+                if (!input) {
+                    errorDiv.textContent = 'Please enter a handle or DID';
+                    errorDiv.style.display = 'block';
+                    return;
+                }
+
+                try {
+                    errorDiv.style.display = 'none';
+                    this.updateStatus('Loading author feed...');
+
+                    // Resolve handle to DID if needed
+                    let did = input;
+                    if (!input.startsWith('did:')) {
+                        did = await this.resolveHandleToDid(input);
+                        if (!did) {
+                            throw new Error('Handle not found');
+                        }
+                    }
+
+                    // Reset feed state
+                    this.resetFeedState();
+
+                    // Fetch author feed
+                    const feedResult = await this.getAuthorFeed(did, null, true);
+                    if (!feedResult) {
+                        throw new Error('Failed to load author feed');
+                    }
+                    
+                    // Populate allPosts with feed items
+                    this.allPosts = feedResult.feed || [];
+                    this.followedAccounts = [{did: did, handle: input}];
+
+                    this.renderPage();
+                    this.hideLoadAuthorFeedModal();
+                    this.updateStatus(`Loaded ${this.allPosts.length} posts from author`);
+                } catch (error) {
+                    errorDiv.textContent = `Error: ${error.message}`;
+                    errorDiv.style.display = 'block';
+                    this.updateStatus(`Error loading author feed: ${error.message}`);
+                }
+            }
+
             async attemptLogin() {
                 const handle = document.getElementById('loginHandle').value.trim();
                 const password = document.getElementById('loginPassword').value.trim();
@@ -402,7 +614,7 @@
                     // Use backend API endpoint
                     const apiUrl = window.location.hostname === 'localhost'
                         ? 'http://localhost:3000/api/login'
-                        : `${window.location.origin}/bsky_backlog/backend.php`;
+                        : `${window.location.origin}/api/login`;
 
                     const response = await fetch(apiUrl, {
                         method: 'POST',
@@ -513,31 +725,60 @@
             async clearCache() {
                 try {
                     // Clear the cache store
+                    this.updateStatus('🧹 Clearing cache store...');
                     await this.cache.clear();
                     
-                    // Delete the entire database
-                    await new Promise((resolve, reject) => {
-                        const deleteRequest = indexedDB.deleteDatabase(this.cache.dbName);
-                        deleteRequest.onsuccess = () => resolve();
-                        deleteRequest.onerror = () => reject(deleteRequest.error);
-                    });
+                    // Close the database connection before deleting
+                    if (this.cache.db) {
+                        this.cache.db.close();
+                        this.cache.db = null;
+                    }
+                    
+                    // Delete the entire database with timeout
+                    this.updateStatus('🧹 Deleting IndexedDB database...');
+                    
+                    await Promise.race([
+                        new Promise((resolve, reject) => {
+                            const deleteRequest = indexedDB.deleteDatabase(this.cache.dbName);
+                            
+                            deleteRequest.onsuccess = () => {
+                                resolve();
+                            };
+                            
+                            deleteRequest.onerror = () => {
+                                reject(deleteRequest.error);
+                            };
+                            
+                            deleteRequest.onblocked = () => {
+                                console.warn('⚠️ Database deletion blocked - close other tabs with this site open');
+                            };
+                        }),
+                        new Promise((resolve, reject) => {
+                            setTimeout(() => {
+                                resolve();
+                            }, 5000);
+                        })
+                    ]);
                     
                     // Reinitialize database
+                    this.updateStatus('🧹 Reinitializing database...');
                     this.cache.db = null;
                     await this.cache.init();
                     
-                    this.updateStatus('✅ Cache cleared successfully');
                     // Reset UI state
+                    this.updateStatus('🧹 Resetting UI state...');
                     this.followedAccounts = [];
                     this.feedCursors = new Map();
                     this.allPosts = [];
                     this.displayedCount = 0;
                     document.getElementById('feed').innerHTML = '';
                     document.getElementById('feedStats').style.display = 'none';
+                    
+                    this.updateStatus('✅ Cache cleared successfully');
                     alert('Cache cleared! You can load a new feed.');
                 } catch (error) {
-                    console.error('Error clearing cache:', error);
-                    this.updateStatus('❌ Error clearing cache');
+                    console.error('❌ [Cache Clear] Error clearing cache:', error);
+                    this.updateStatus(`❌ Error clearing cache: ${error.message}`);
                 }
             }
 
@@ -742,7 +983,7 @@
             }
 
             async getAuthorFeed(actor, cursor, isInitial = true, filter = 'posts_with_replies') {
-                const cacheKey = `feed:${actor}:${cursor || '0'}:${filter}`;
+                const cacheKey = this.getFeedCacheKey(actor, cursor, filter);
                 const cached = await this.cache.get(cacheKey);
                 if (cached) return cached;
 
@@ -830,12 +1071,10 @@
                     );
                 }
 
-                // Check if we have more posts to display
-                if (filteredPosts.length <= this.displayedCount) {
-                    return;
+                // Render if we have more posts to display
+                if (filteredPosts.length > this.displayedCount) {
+                    this.renderPage();
                 }
-
-                this.renderPage();
             }
 
             renderPage() {
@@ -844,14 +1083,17 @@
                 // Get startDate from input
                 const startDateInput = document.getElementById('startDateInput').value;
                 const startDate = startDateInput ? new Date(startDateInput).toISOString() : null;
+                const filterKey = this.getFilterCacheKey();
 
-                // Filter posts to only show those after startDate
-                let filteredPosts = this.allPosts;
-                if (startDate) {
-                    filteredPosts = this.allPosts.filter(item =>
-                        this.getPostDate(item).toISOString() >= startDate
+                // Only filter if params changed
+                if (this.lastFilterParams !== filterKey) {
+                    this.filteredPostsCache = this.allPosts.filter(item =>
+                        !startDate || this.getPostDate(item).toISOString() >= startDate
                     );
+                    this.lastFilterParams = filterKey;
                 }
+
+                let filteredPosts = this.filteredPostsCache;
 
                 // Sort based on selected order
                 if (this.sortOrder === 'descending') {
@@ -866,6 +1108,8 @@
 
                 const newPosts = filteredPosts.slice(this.displayedCount, this.displayedCount + this.postsPerPage);
 
+                // Use document fragment for batch DOM inserts
+                const fragment = document.createDocumentFragment();
                 newPosts.forEach(item => {
                     const post = item.post;
                     const author = post.author;
@@ -903,6 +1147,27 @@
                     } else if (record.embed && record.embed.images && record.embed.images.length > 0) {
                         // Direct image embed
                         imagesToProcess = record.embed.images;
+                    } else if (post.embed && post.embed.$type === 'app.bsky.embed.external#view' && post.embed.external) {
+                        // External link - use the actual URI if it's a media file, otherwise show as clickable link
+                        const externalUri = post.embed.external.uri;
+                        const externalThumb = post.embed.external.thumb;
+                        const externalTitle = post.embed.external.title || '';
+                        const externalDesc = post.embed.external.description || '';
+                        
+                        // Check if it's a direct media URL (GIF, WebP, etc)
+                        if (externalUri && /\.(gif|webp|mp4|webm)(\?|$)/i.test(externalUri)) {
+                            // Use the actual media URL
+                            imagesToProcess = [{ thumb: externalUri, alt: externalDesc }];
+                        } else {
+                            // Show as clickable card with thumbnail linking to external URL
+                            imagesHtml = `<div class="post-external-link" onclick="window.open('${externalUri.replace(/'/g, "\\'")}', '_blank')">
+                                <img src="${externalThumb}" alt="${externalDesc}">
+                                <div class="post-external-link-info">
+                                    <div class="post-external-link-title">${this.escapeHtml(externalTitle)}</div>
+                                    <div class="post-external-link-domain">${this.escapeHtml(externalUri.replace(/https?:\/\/(www\.)?/, '').split('/')[0])}</div>
+                                </div>
+                            </div>`;
+                        }
                     }
 
                     if (imagesToProcess.length > 0) {
@@ -926,7 +1191,8 @@
                             let imageUrl = imageUrls[index];
                             if (imageUrl) {
                                 const alt = img.alt || 'Post image';
-                                imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" onclick="app.openImageModal('${imageUrl.replace(/'/g, "\\'")}', ${JSON.stringify(imageUrls).replace(/"/g, '&quot;')})" />`;
+                                const preloadHandler = this.imagePreloadingEnabled ? `onmouseover="app.preloadImage('${imageUrl.replace(/'/g, "\\'")}')"` : '';
+                                imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" ${preloadHandler} onclick="app.openImageModal('${imageUrl.replace(/'/g, "\\'")}', ${JSON.stringify(imageUrls).replace(/"/g, '&quot;')})" />`;
                             }
                         });
                         imagesHtml += '</div>';
@@ -1095,6 +1361,52 @@
                             quote.embeds.forEach(embed => {
                                 if (embed.images) {
                                     parentImages = embed.images;
+                                } else if (embed.media && embed.media.images) {
+                                    parentImages = embed.media.images;
+                                }
+                            });
+                        }
+                    }
+                    // Record embed view (returned from API thread view)
+                    else if (post.embed && post.embed.$type === 'app.bsky.embed.record#view' && post.embed.record && post.embed.record.value) {
+                        const viewRecord = post.embed.record.value;
+                        parentAuthor = post.embed.record.author;
+                        parentText = viewRecord.text ? this.escapeHtml(viewRecord.text) : '';
+                        parentUri = post.embed.record.uri;
+                        parentCid = post.embed.record.cid || '';
+                        if (viewRecord) {
+                            const parentDate = new Date(viewRecord.createdAt);
+                            parentTime = this.formatTimeAgo(parentDate);
+                            parentFullDate = parentDate.toLocaleString();
+                        }
+
+                        // Extract stats from quote parent post
+                        parentStats = {
+                            likes: post.embed.record.likeCount || 0,
+                            replies: post.embed.record.replyCount || 0,
+                            reposts: post.embed.record.repostCount || 0
+                        };
+
+                        // Extract viewer data from quote parent post
+                        if (this.authToken && post.embed.record.viewer) {
+                            if (post.embed.record.viewer.like) {
+                                this.likedPosts.set(parentUri, post.embed.record.viewer.like);
+                            }
+                            if (post.embed.record.viewer.repost) {
+                                this.repostedPosts.set(parentUri, post.embed.record.viewer.repost);
+                            }
+                        }
+
+                        // Extract images from parent post value
+                        if (viewRecord.embed && viewRecord.embed.images) {
+                            parentImages = viewRecord.embed.images;
+                        } else if (post.embed.record.embeds && post.embed.record.embeds.length > 0) {
+                            // Also check embeds on the record object for nested media
+                            post.embed.record.embeds.forEach(embed => {
+                                if (embed.images) {
+                                    parentImages = embed.images;
+                                } else if (embed.media && embed.media.images) {
+                                    parentImages = embed.media.images;
                                 }
                             });
                         }
@@ -1234,7 +1546,32 @@
                         ${this.generatePostStats(post.uri, post.cid, post.replyCount, post.likeCount, post.repostCount)}
                     `;
 
-                    feed.appendChild(postEl);
+                    fragment.appendChild(postEl);
+                });
+
+                // Append all posts at once (single DOM reflow)
+                feed.appendChild(fragment);
+
+                // Attach event listeners for like/repost buttons
+                const likeButtons = feed.querySelectorAll('button[data-action="like"]');
+                const repostButtons = feed.querySelectorAll('button[data-action="repost"]');
+                
+                likeButtons.forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        const postUri = btn.getAttribute('data-uri');
+                        const postCid = btn.getAttribute('data-cid');
+                        this.toggleLike(postUri, postCid);
+                    });
+                });
+                
+                repostButtons.forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        const postUri = btn.getAttribute('data-uri');
+                        const postCid = btn.getAttribute('data-cid');
+                        this.toggleRepost(postUri, postCid);
+                    });
                 });
 
                 this.displayedCount += newPosts.length;
@@ -1447,19 +1784,22 @@
             }
 
             generatePostStats(postUri, postCid, replyCount, likeCount, repostCount) {
+                const isLiked = this.likedPosts.has(postUri);
+                const isReposted = this.repostedPosts.has(postUri);
+                
+                const likeBtn = this.authToken ? 
+                    `<button class="post-action-button${isLiked ? ' liked' : ''}" data-action="like" data-uri="${postUri}" data-cid="${postCid}">❤️ <span class="like-count" data-uri="${postUri}">${likeCount || 0}</span></button>` : 
+                    `<span class="post-stat">❤️ ${likeCount || 0}</span>`;
+                
+                const repostBtn = this.authToken ? 
+                    `<button class="post-action-button${isReposted ? ' reposted' : ''}" data-action="repost" data-uri="${postUri}" data-cid="${postCid}">🔄 <span class="repost-count" data-uri="${postUri}">${repostCount || 0}</span></button>` : 
+                    `<span class="post-stat">🔄 ${repostCount || 0}</span>`;
+                
                 return `<div class="post-stats">
                             <span class="post-stat">💬 ${replyCount || 0}</span>
-                            ${this.authToken ? `<button class="post-action-button${this.likedPosts.has(postUri) ? ' liked' : ''}" onclick="app.toggleLike('${postUri.replace(/'/g, "\\'")}', '${postCid.replace(/'/g, "\\'")}')">❤️ <span class="like-count" data-uri="${postUri}">${likeCount || 0}</span></button>` : `<span class="post-stat">❤️ ${likeCount || 0}</span>`}
-                            ${this.authToken ? `<button class="post-action-button${this.repostedPosts.has(postUri) ? ' reposted' : ''}" onclick="app.toggleRepost('${postUri.replace(/'/g, "\\'")}', '${postCid.replace(/'/g, "\\'")}')">🔄 <span class="repost-count" data-uri="${postUri}">${repostCount || 0}</span></button>` : `<span class="post-stat">🔄 ${repostCount || 0}</span>`}
+                            ${likeBtn}
+                            ${repostBtn}
                         </div>`;
-            }
-
-            showError(message) {
-                const feed = document.getElementById('feed');
-                const errorEl = document.createElement('div');
-                errorEl.className = 'error';
-                errorEl.textContent = message;
-                feed.insertBefore(errorEl, feed.firstChild);
             }
 
             createRateLimiter(requestsPerSecond) {
@@ -1498,6 +1838,17 @@
                 return false;
             }
 
+            preloadImage(imageUrl) {
+                // Preload image when user hovers over it
+                if (this.preloadedImages.has(imageUrl)) {
+                    return; // Already preloaded
+                }
+
+                const img = new Image();
+                img.src = imageUrl;
+                this.preloadedImages.add(imageUrl);
+            }
+
             openImageModal(imageUrl, allImages = null) {
                 const modal = document.getElementById('imageModal');
                 const modalImage = document.getElementById('modalImage');
@@ -1530,6 +1881,20 @@
                         this.closeImageModal();
                     }
                 };
+                
+                // Add keyboard navigation
+                this.keyboardHandler = (e) => {
+                    if (e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        this.previousImage();
+                    } else if (e.key === 'ArrowRight') {
+                        e.preventDefault();
+                        this.nextImage();
+                    } else if (e.key === 'Escape') {
+                        this.closeImageModal();
+                    }
+                };
+                document.addEventListener('keydown', this.keyboardHandler);
             }
 
             previousImage() {
@@ -1556,6 +1921,11 @@
             closeImageModal() {
                 const modal = document.getElementById('imageModal');
                 modal.classList.remove('active');
+                // Remove keyboard handler
+                if (this.keyboardHandler) {
+                    document.removeEventListener('keydown', this.keyboardHandler);
+                    this.keyboardHandler = null;
+                }
             }
 
             toggleDarkMode() {
@@ -1580,10 +1950,25 @@
                     button.title = isDarkMode ? 'Switch to light mode' : 'Switch to dark mode';
                 }
             }
+
+            toggleImagePreloading() {
+                this.imagePreloadingEnabled = !this.imagePreloadingEnabled;
+                localStorage.setItem('imagePreloadingEnabled', this.imagePreloadingEnabled);
+                this.updatePreloadToggleButton();
+            }
+
+            updatePreloadToggleButton() {
+                const btn = document.getElementById('preloadToggleBtn');
+                if (btn) {
+                    btn.textContent = this.imagePreloadingEnabled ? '✓ Image Preload' : '✗ Image Preload';
+                    btn.title = this.imagePreloadingEnabled ? 'Disable image preloading' : 'Enable image preloading';
+                }
+            }
         }
 
         // Initialize app
         const app = new BskyFeedApp();
+        app.updatePreloadToggleButton();
     </script>
 </body>
 
