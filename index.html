@@ -614,7 +614,7 @@
                     // Use backend API endpoint
                     const apiUrl = window.location.hostname === 'localhost'
                         ? 'http://localhost:3000/api/login'
-                        : `${window.location.origin}/api/login`;
+                        : `${window.location.origin}/bsky_backlog/backend.php`;
 
                     const response = await fetch(apiUrl, {
                         method: 'POST',
