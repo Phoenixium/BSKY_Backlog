@@ -106,7 +106,7 @@
             getFilterCacheKey() {
                 const startDateInput = document.getElementById('startDateInput').value;
                 const sortOrder = this.sortOrder;
-                return `${startDateInput}:${sortOrder}:${this.deduplicatePosts}:${this.muteBlockListLoaded}`;
+                return `${startDateInput}:${sortOrder}:${this.deduplicatePosts}:${this.muteBlockEnabled}:${this.muteBlockListLoaded}`;
             }
 
             getDateRangeFromUI() {
@@ -686,8 +686,9 @@
             }
 
             async loadDebugFeedsForViewerData(actor) {
-                // Load viewer data for debug author feed with secondary accounts (skip primary)
-                const limiter = this.createRateLimiter(3);
+                // Load viewer data for author feed mode with secondary accounts (skip primary).
+                // Must use each account's own token and respect the date range.
+                const { startDate, endDate } = this.getDateRangeFromUI();
 
                 for (let idx = 1; idx < this.activeAccounts.length; idx++) {
                     const slot = this.activeAccounts[idx];
@@ -695,13 +696,8 @@
                     if (!account) continue;
 
                     try {
-                        await limiter.wait();
-                        const result = await this.getAuthorFeed(actor, null, true, 'posts_with_replies', slot);
-                        
-                        if (result && result.feed) {
-                            // Viewer data already extracted into Maps by getAuthorFeed with accountSlot
-                            this.updateStatus(`✅ Loaded interaction state for account ${slot}`);
-                        }
+                        await this.getAuthorFeedWithDateRangeForAccount(actor, endDate, startDate, 'posts_with_replies', slot);
+                        this.updateStatus(`✅ Loaded interaction state for account ${slot}`);
                     } catch (error) {
                         console.warn(`Error loading feed for account ${slot}:`, error);
                     }
@@ -782,10 +778,15 @@
                     await this.cache.set('auth:activeAccounts', this.activeAccounts, 24 * 3600 * 1000);
 
                     // Update primary account tokens for backward compatibility
-                    this.authToken = data.accessJwt;
-                    this.userDid = data.did;
-                    this.userHandle = data.handle;
-                    this.refreshToken = data.refreshJwt;
+                    // Only update when this slot IS the primary account; logging in as a
+                    // secondary account (slot B) must not overwrite A's token, otherwise
+                    // Phase-1 feed fetches would use B's token but store viewer data in A's maps.
+                    if (slot === this.activeAccounts[0]) {
+                        this.authToken = data.accessJwt;
+                        this.userDid = data.did;
+                        this.userHandle = data.handle;
+                        this.refreshToken = data.refreshJwt;
+                    }
 
                     this.updateAuthUI();
                     
@@ -1187,6 +1188,11 @@
                         this.updateStatus(`Loaded ${this.allPosts.length} posts from author`);
                     }
 
+                    // Persist viewer state so it survives page refreshes within the feed cache window
+                    for (const slot of this.activeAccounts) {
+                        await this.saveInteractionState(slot);
+                    }
+
                     this.renderPage();
                 } catch (error) {
                     this.updateStatus(`Error loading author feed: ${error.message}`);
@@ -1257,6 +1263,11 @@
                     }
                     
                     this.followedAccounts = [{did: did, handle: handle}];
+
+                    // Persist viewer state so it survives page refreshes within the feed cache window
+                    for (const slot of this.activeAccounts) {
+                        await this.saveInteractionState(slot);
+                    }
 
                     this.renderPage();
                 } catch (error) {
@@ -1441,6 +1452,11 @@
                 if (this.activeAccounts.length >= 2) {
                     this.updateStatus('🔄 Loading interaction state for all accounts...');
                     await this.loadFeedsForViewerData();
+                }
+
+                // Persist the viewer state so it survives page refreshes within the feed cache window
+                for (const slot of this.activeAccounts) {
+                    await this.saveInteractionState(slot);
                 }
             }
 
@@ -1766,8 +1782,9 @@
                     };
 
                     // Extract viewer data for primary account (Phase 1 uses this method)
-                    if (data.feed && this.activeAccounts.length > 0) {
-                        const primarySlot = this.activeAccounts[0];
+                    // Also handles legacy single-account where activeAccounts may be empty
+                    if (data.feed && (this.activeAccounts.length > 0 || this.authToken)) {
+                        const primarySlot = this.activeAccounts.length > 0 ? this.activeAccounts[0] : null;
                         const { likedMap: targetMap_liked, repostedMap: targetMap_reposted } = this.getMapsForSlot(primarySlot);
                         let likedCount = 0, repostedCount = 0;
                         data.feed.forEach(item => {
@@ -1779,6 +1796,18 @@
                                 }
                                 if (post.viewer.repost) {
                                     targetMap_reposted.set(post.uri, post.viewer.repost);
+                                    repostedCount++;
+                                }
+                            }
+                            // Also capture viewer data from reply parent
+                            if (item.reply && item.reply.parent && item.reply.parent.viewer) {
+                                const parent = item.reply.parent;
+                                if (parent.viewer.like) {
+                                    targetMap_liked.set(parent.uri, parent.viewer.like);
+                                    likedCount++;
+                                }
+                                if (parent.viewer.repost) {
+                                    targetMap_reposted.set(parent.uri, parent.viewer.repost);
                                     repostedCount++;
                                 }
                             }
@@ -1846,8 +1875,8 @@
                     // Render if we have more posts to display
                     if (filteredPosts.length > this.displayedCount) {
                         this.showBatchLoadingIndicator();
-                        // Yield to browser so it can paint the indicator before the sync render
-                        await new Promise(r => requestAnimationFrame(r));
+                        // Two rAF passes: first schedules the paint, second runs after it completes
+                        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
                         const pendingFetches = this.renderPage();
                         // If there are HTTP requests in-flight (likes mode), wait for them all
                         if (pendingFetches && pendingFetches.length > 0) {
@@ -1863,13 +1892,13 @@
             showBatchLoadingIndicator() {
                 const el = document.getElementById('batch-loading-indicator');
                 if (el) el.style.display = 'flex';
-                document.documentElement.style.overflow = 'hidden';
+                document.documentElement.style.overflowY = 'hidden';
             }
 
             hideBatchLoadingIndicator() {
                 const el = document.getElementById('batch-loading-indicator');
                 if (el) el.style.display = 'none';
-                document.documentElement.style.overflow = '';
+                document.documentElement.style.overflowY = '';
             }
 
             renderPage() {
@@ -2555,6 +2584,15 @@
                             }
                         }
 
+                        // Update counts on all instances for this account
+                        document.querySelectorAll(`button[data-action="like"][data-account="${account}"][data-uri="${postUri}"]`).forEach(btn => {
+                            const countSpan = btn.querySelector('span.like-count');
+                            if (countSpan) {
+                                const currentCount = parseInt(countSpan.textContent) || 0;
+                                countSpan.textContent = isLiked ? Math.max(0, currentCount - 1) : currentCount + 1;
+                            }
+                        });
+
                         // Save interaction state to cache
                         await this.saveInteractionState(account);
                     } catch (error) {
@@ -2562,9 +2600,12 @@
                         alert(`Failed to update like for account ${account}`);
                     }
                 } else {
-                    // Single account mode (legacy)
+                    // Single account mode: use account-specific map if available, or legacy map
                     try {
-                        const isLiked = this.likedPosts.has(postUri);
+                        // Use account-specific map if single account is active, otherwise use legacy map
+                        const singleSlot = this.activeAccounts.length === 1 ? this.activeAccounts[0] : null;
+                        const { likedMap: targetMap } = this.getMapsForSlot(singleSlot);
+                        const isLiked = targetMap.has(postUri);
 
                         // Apply optimistic update explicitly to target state
                         const applyLikeState = (active) => {
@@ -2576,7 +2617,7 @@
 
                         if (isLiked) {
                             // Unlike
-                            const likeUri = this.likedPosts.get(postUri);
+                            const likeUri = targetMap.get(postUri);
                             const rkey = likeUri.split('/').pop();
 
                             const delResp = await fetch(`https://bsky.social/xrpc/com.atproto.repo.deleteRecord`, {
@@ -2592,7 +2633,7 @@
                                 })
                             });
                             if (delResp.ok) {
-                                this.likedPosts.delete(postUri);
+                                targetMap.delete(postUri);
                             } else {
                                 applyLikeState(true); // revert
                                 throw new Error(`HTTP ${delResp.status}`);
@@ -2621,7 +2662,7 @@
 
                             if (response.ok) {
                                 const data = await response.json();
-                                this.likedPosts.set(postUri, data.uri);
+                                targetMap.set(postUri, data.uri);
                             } else {
                                 applyLikeState(false); // revert
                                 throw new Error(`HTTP ${response.status}`);
@@ -2633,6 +2674,11 @@
                             const currentCount = parseInt(span.textContent) || 0;
                             span.textContent = isLiked ? Math.max(0, currentCount - 1) : currentCount + 1;
                         });
+
+                        // Save interaction state to cache (for single account with active slot)
+                        if (singleSlot) {
+                            await this.saveInteractionState(singleSlot);
+                        }
                     } catch (error) {
                         console.error('Like toggle error:', error);
                         alert('Failed to update like');
@@ -2727,6 +2773,15 @@
                             }
                         }
 
+                        // Update counts on all instances for this account
+                        document.querySelectorAll(`button[data-action="repost"][data-account="${account}"][data-uri="${postUri}"]`).forEach(btn => {
+                            const countSpan = btn.querySelector('span.repost-count');
+                            if (countSpan) {
+                                const currentCount = parseInt(countSpan.textContent) || 0;
+                                countSpan.textContent = isReposted ? Math.max(0, currentCount - 1) : currentCount + 1;
+                            }
+                        });
+
                         // Save interaction state to cache
                         await this.saveInteractionState(account);
                     } catch (error) {
@@ -2734,9 +2789,12 @@
                         alert(`Failed to update repost for account ${account}`);
                     }
                 } else {
-                    // Single account mode (legacy)
+                    // Single account mode: use account-specific map if available, or legacy map
                     try {
-                        const isReposted = this.repostedPosts.has(postUri);
+                        // Use account-specific map if single account is active, otherwise use legacy map
+                        const singleSlot = this.activeAccounts.length === 1 ? this.activeAccounts[0] : null;
+                        const { repostedMap: targetMap } = this.getMapsForSlot(singleSlot);
+                        const isReposted = targetMap.has(postUri);
 
                         // Apply optimistic update explicitly to target state
                         const applyRepostState = (active) => {
@@ -2748,7 +2806,7 @@
 
                         if (isReposted) {
                             // Unrepost
-                            const repostUri = this.repostedPosts.get(postUri);
+                            const repostUri = targetMap.get(postUri);
                             const rkey = repostUri.split('/').pop();
 
                             const delResp = await fetch(`https://bsky.social/xrpc/com.atproto.repo.deleteRecord`, {
@@ -2764,7 +2822,7 @@
                                 })
                             });
                             if (delResp.ok) {
-                                this.repostedPosts.delete(postUri);
+                                targetMap.delete(postUri);
                             } else {
                                 applyRepostState(true); // revert
                                 throw new Error(`HTTP ${delResp.status}`);
@@ -2793,7 +2851,7 @@
 
                             if (response.ok) {
                                 const data = await response.json();
-                                this.repostedPosts.set(postUri, data.uri);
+                                targetMap.set(postUri, data.uri);
                             } else {
                                 applyRepostState(false); // revert
                                 throw new Error(`HTTP ${response.status}`);
@@ -2805,6 +2863,11 @@
                             const currentCount = parseInt(span.textContent) || 0;
                             span.textContent = isReposted ? Math.max(0, currentCount - 1) : currentCount + 1;
                         });
+
+                        // Save interaction state to cache (for single account with active slot)
+                        if (singleSlot) {
+                            await this.saveInteractionState(singleSlot);
+                        }
                     } catch (error) {
                         console.error('Repost toggle error:', error);
                         alert('Failed to update repost');
@@ -3075,6 +3138,18 @@
                             repostedCount++;
                         }
                     }
+                    // Also capture viewer data from reply parent
+                    if (item.reply && item.reply.parent && item.reply.parent.viewer) {
+                        const parent = item.reply.parent;
+                        if (parent.viewer.like) {
+                            targetMap_liked.set(parent.uri, parent.viewer.like);
+                            likedCount++;
+                        }
+                        if (parent.viewer.repost) {
+                            targetMap_reposted.set(parent.uri, parent.viewer.repost);
+                            repostedCount++;
+                        }
+                    }
                 });
 
                 return { liked: likedCount, reposted: repostedCount };
@@ -3287,56 +3362,60 @@
 
             async fetchMutedAccounts() {
                 const mutes = [];
-                let cursor = null;
-                try {
-                    while (true) {
-                        const url = `https://bsky.social/xrpc/app.bsky.graph.getMutes?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
-                        const response = await fetch(url, {
-                            headers: {
-                                'Authorization': `Bearer ${this.authToken}`
+                // Collect tokens for all active accounts, falling back to authToken
+                const tokens = this.activeAccounts.length > 0
+                    ? this.activeAccounts.map(s => this.accounts[s]?.token).filter(Boolean)
+                    : (this.authToken ? [this.authToken] : []);
+
+                for (const token of tokens) {
+                    let cursor = null;
+                    try {
+                        while (true) {
+                            const url = `https://bsky.social/xrpc/app.bsky.graph.getMutes?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+                            const response = await fetch(url, {
+                                headers: { 'Authorization': `Bearer ${token}` }
+                            });
+                            if (!response.ok) break;
+                            const data = await response.json();
+                            if (data.mutes && Array.isArray(data.mutes)) {
+                                mutes.push(...data.mutes.map(m => m.did));
                             }
-                        });
-                        
-                        if (!response.ok) break;
-                        const data = await response.json();
-                        
-                        if (data.mutes && Array.isArray(data.mutes)) {
-                            mutes.push(...data.mutes.map(m => m.did));
+                            if (!data.cursor) break;
+                            cursor = data.cursor;
                         }
-                        
-                        if (!data.cursor) break;
-                        cursor = data.cursor;
+                    } catch (error) {
+                        console.warn('Error fetching muted accounts:', error);
                     }
-                } catch (error) {
-                    console.warn('Error fetching muted accounts:', error);
                 }
                 return mutes;
             }
 
             async fetchBlockedAccounts() {
                 const blocks = [];
-                let cursor = null;
-                try {
-                    while (true) {
-                        const url = `https://bsky.social/xrpc/app.bsky.graph.getBlocks?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
-                        const response = await fetch(url, {
-                            headers: {
-                                'Authorization': `Bearer ${this.authToken}`
+                // Collect tokens for all active accounts, falling back to authToken
+                const tokens = this.activeAccounts.length > 0
+                    ? this.activeAccounts.map(s => this.accounts[s]?.token).filter(Boolean)
+                    : (this.authToken ? [this.authToken] : []);
+
+                for (const token of tokens) {
+                    let cursor = null;
+                    try {
+                        while (true) {
+                            const url = `https://bsky.social/xrpc/app.bsky.graph.getBlocks?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+                            const response = await fetch(url, {
+                                headers: { 'Authorization': `Bearer ${token}` }
+                            });
+                            if (!response.ok) break;
+                            const data = await response.json();
+                            if (data.blocks && Array.isArray(data.blocks)) {
+                                blocks.push(...data.blocks.map(b => b.did));
                             }
-                        });
-                        
-                        if (!response.ok) break;
-                        const data = await response.json();
-                        
-                        if (data.blocks && Array.isArray(data.blocks)) {
-                            blocks.push(...data.blocks.map(b => b.did));
+                            if (!data.cursor) break;
+                            cursor = data.cursor;
                         }
-                        
-                        if (!data.cursor) break;
-                        cursor = data.cursor;
+                    } catch (error) {
+                        console.warn('Error fetching blocked accounts:', error);
                     }
-                } catch (error) {
-                    console.warn('Error fetching blocked accounts:', error);
                 }
                 return blocks;
             }

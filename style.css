@@ -8,6 +8,7 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
     background-color: #f7f7f7;
     color: #333;
+    overflow-x: hidden;
 }
 
 .container {
@@ -303,6 +304,7 @@ button:disabled {
     display: flex;
     flex-direction: column;
     justify-content: center;
+    min-width: 0;
 }
 
 .post-parent-author-name {
@@ -371,6 +373,7 @@ button:disabled {
     color: #333;
     margin-bottom: 8px;
     word-wrap: break-word;
+    overflow-wrap: break-word;
     line-height: 1.4;
 }
 
@@ -387,6 +390,7 @@ button:disabled {
 
 .post-info {
     flex: 1;
+    min-width: 0;
 }
 
 .post-info > div:first-child {
@@ -428,6 +432,7 @@ button:disabled {
     margin-bottom: 12px;
     line-height: 1.5;
     word-wrap: break-word;
+    overflow-wrap: break-word;
 }
 
 .post-images {
@@ -1624,4 +1629,46 @@ button:disabled {
 
 [data-theme="dark"] .thread-no-thread {
     color: #8b949e;
+}
+
+/* Batch Loading Indicator */
+#batch-loading-indicator {
+    display: none;
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(17, 133, 254, 0.92);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    border-radius: 999px;
+    padding: 10px 20px;
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: white;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    white-space: nowrap;
+}
+
+.batch-spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: batchSpin 0.75s linear infinite;
+    flex-shrink: 0;
+}
+
+@keyframes batchSpin {
+    to { transform: rotate(360deg); }
+}
+
+[data-theme="dark"] #batch-loading-indicator {
+    background: rgba(17, 133, 254, 0.85);
 }
