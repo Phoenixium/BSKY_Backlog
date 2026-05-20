@@ -435,6 +435,13 @@ button:disabled {
     overflow-wrap: break-word;
 }
 
+.word-break-indicator {
+    color: #aaa;
+    font-size: 0.75em;
+    user-select: none;
+    margin-left: 2px;
+}
+
 .post-images {
     margin: 12px 0;
     display: grid;
@@ -667,7 +674,7 @@ button:disabled {
     font-size: 13px;
     color: #657786;
     border-bottom: 1px solid #efefef;
-    z-index: 100;
+    z-index: 500;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -1671,4 +1678,62 @@ button:disabled {
 
 [data-theme="dark"] #batch-loading-indicator {
     background: rgba(17, 133, 254, 0.85);
+}
+
+/* Batch divider — appears between scroll-triggered batches while loading */
+.batch-divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    font-size: 12px;
+    color: #657786;
+    transition: opacity 0.5s ease;
+}
+
+.batch-divider::before,
+.batch-divider::after {
+    content: '';
+    flex: 1;
+    border-top: 1px dashed #d0d7de;
+}
+
+.batch-divider--loading .batch-divider-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid #d0d7de;
+    border-top-color: #1185fe;
+    border-radius: 50%;
+    animation: batchSpin 0.7s linear infinite;
+    flex-shrink: 0;
+}
+
+.batch-divider--done .batch-divider-spinner {
+    display: none;
+}
+
+.batch-divider--done::before,
+.batch-divider--done::after {
+    border-top-style: solid;
+    border-color: #e8e8e8;
+}
+
+[data-theme="dark"] .batch-divider {
+    color: #8b949e;
+}
+
+[data-theme="dark"] .batch-divider::before,
+[data-theme="dark"] .batch-divider::after {
+    border-color: #30363d;
+}
+
+[data-theme="dark"] .batch-divider--loading .batch-divider-spinner {
+    border-color: #30363d;
+    border-top-color: #1185fe;
+}
+
+[data-theme="dark"] .batch-divider--done::before,
+[data-theme="dark"] .batch-divider--done::after {
+    border-color: #21262d;
 }

@@ -676,7 +676,7 @@
                         </div>
                     </div>
                     <a href="https://bsky.app/profile/${author.did}/post/${post.uri.split('/').pop()}" class="post-link" target="_blank" rel="noopener noreferrer">
-                        <div class="post-text">${this.escapeHtml(record.text)}</div>
+                        <div class="post-text">${this.breakLongWords(record.text)}</div>
                     </a>
                     ${imagesHtml}
                     ${this.generatePostStats(post.uri, post.cid, post.replyCount, post.likeCount, post.repostCount)}
@@ -938,8 +938,10 @@
                     }
                     statsText.textContent = statsStr;
                     stats.style.display = 'flex';
+                    document.body.classList.add('feed-stats-visible');
                 } else {
                     stats.style.display = 'none';
+                    document.body.classList.remove('feed-stats-visible');
                 }
             }
 
@@ -963,6 +965,7 @@
                 this.displayedCount = 0;
                 document.getElementById('feed').innerHTML = '';
                 document.getElementById('feedStats').style.display = 'none';
+                document.body.classList.remove('feed-stats-visible');
             }
 
             toggleMenu() {
@@ -1035,6 +1038,7 @@
                     this.displayedCount = 0;
                     document.getElementById('feed').innerHTML = '';
                     document.getElementById('feedStats').style.display = 'none';
+                    document.body.classList.remove('feed-stats-visible');
                     
                     this.updateStatus('✅ Cache cleared successfully');
                     alert('Cache cleared! You can load a new feed.');
@@ -1883,6 +1887,17 @@
                             await Promise.allSettled(pendingFetches);
                         }
                         this.hideBatchLoadingIndicator();
+                        // Resolve the batch divider: transition to done then fade out
+                        if (this._lastBatchDivider) {
+                            const divider = this._lastBatchDivider;
+                            this._lastBatchDivider = null;
+                            divider.classList.remove('batch-divider--loading');
+                            divider.classList.add('batch-divider--done');
+                            setTimeout(() => {
+                                divider.style.opacity = '0';
+                                setTimeout(() => divider.remove(), 500);
+                            }, 600);
+                        }
                     }
                 } finally {
                     this.isLoading = false;
@@ -1892,13 +1907,11 @@
             showBatchLoadingIndicator() {
                 const el = document.getElementById('batch-loading-indicator');
                 if (el) el.style.display = 'flex';
-                document.documentElement.style.overflowY = 'hidden';
             }
 
             hideBatchLoadingIndicator() {
                 const el = document.getElementById('batch-loading-indicator');
                 if (el) el.style.display = 'none';
-                document.documentElement.style.overflowY = '';
             }
 
             renderPage() {
@@ -1981,6 +1994,16 @@
 
                 // Use document fragment for batch DOM inserts
                 const fragment = document.createDocumentFragment();
+
+                // Prepend a batch-loading divider before the first post of every batch after the first
+                if (this.displayedCount > 0) {
+                    const divider = document.createElement('div');
+                    divider.className = 'batch-divider batch-divider--loading';
+                    divider.innerHTML = '<span class="batch-divider-spinner"></span><span class="batch-divider-label">Loading next batch…</span>';
+                    fragment.appendChild(divider);
+                    this._lastBatchDivider = divider;
+                }
+
                 newPosts.forEach(item => {
                     // Handle lazy-loaded posts in likes mode
                     if (item.placeholder && item.uri && this.isLikesMode) {
@@ -2053,7 +2076,7 @@
                         } else {
                             // Show as clickable card with thumbnail linking to external URL
                             imagesHtml = `<div class="post-external-link" onclick="window.open('${externalUri.replace(/'/g, "\\'")}', '_blank')">
-                                <img src="${externalThumb}" alt="${externalDesc}">
+                                <img src="${externalThumb || ''}" alt="${this.escapeHtml(externalDesc)}">
                                 <div class="post-external-link-info">
                                     <div class="post-external-link-title">${this.escapeHtml(externalTitle)}</div>
                                     <div class="post-external-link-domain">${this.escapeHtml(externalUri.replace(/https?:\/\/(www\.)?/, '').split('/')[0])}</div>
@@ -2103,7 +2126,7 @@
                     if (item.reply && item.reply.parent) {
                         const replyParent = item.reply.parent;
                         replyParentAuthor = replyParent.author;
-                        replyParentText = replyParent.record ? this.escapeHtml(replyParent.record.text) : '';
+                        replyParentText = replyParent.record ? this.breakLongWords(replyParent.record.text) : '';
                         replyParentUri = replyParent.uri;
                         replyParentCid = replyParent.cid || '';
                         if (replyParent.record) {
@@ -2194,7 +2217,7 @@
                     if (record.embed && record.embed.$type === 'app.bsky.embed.quote' && record.embed.quote) {
                         const quote = record.embed.quote;
                         parentAuthor = quote.author;
-                        parentText = quote.record ? this.escapeHtml(quote.record.text) : '';
+                        parentText = quote.record ? this.breakLongWords(quote.record.text) : '';
                         parentUri = quote.uri;
                         parentCid = quote.cid || '';
                         if (quote.record) {
@@ -2231,7 +2254,7 @@
                     else if (post.embed && post.embed.$type === 'app.bsky.embed.record#view' && post.embed.record && post.embed.record.value) {
                         const viewRecord = post.embed.record.value;
                         parentAuthor = post.embed.record.author;
-                        parentText = viewRecord.text ? this.escapeHtml(viewRecord.text) : '';
+                        parentText = viewRecord.text ? this.breakLongWords(viewRecord.text) : '';
                         parentUri = post.embed.record.uri;
                         parentCid = post.embed.record.cid || '';
                         if (viewRecord) {
@@ -2277,7 +2300,7 @@
                     else if (post.embed && post.embed.$type === 'app.bsky.embed.recordWithMedia#view' && post.embed.record && post.embed.record.record) {
                         const viewRecord = post.embed.record.record;
                         parentAuthor = viewRecord.author;
-                        parentText = viewRecord.value ? this.escapeHtml(viewRecord.value.text) : '';
+                        parentText = viewRecord.value ? this.breakLongWords(viewRecord.value.text) : '';
                         parentUri = viewRecord.uri;
                         parentCid = viewRecord.cid || '';
                         if (viewRecord.value) {
@@ -2382,7 +2405,7 @@
                         </div>
                         ${replyParentPostHtml}
                         <a href="https://bsky.app/profile/${author.did}/post/${post.uri.split('/').pop()}" class="post-link" target="_blank" rel="noopener noreferrer">
-                            <div class="post-text">${this.escapeHtml(record.text)}</div>
+                            <div class="post-text">${this.breakLongWords(record.text)}</div>
                         </a>
                         ${imagesHtml}
                         ${videoHtml}
@@ -2462,6 +2485,7 @@
                 if (this.followedAccounts.length > 0) {
                     statsText.textContent = `👥 Following ${this.followedAccounts.length} accounts | 📮 Collected ${this.allPosts.length} posts | 📋 In range ${filteredTotal} posts | 👀 Displaying ${this.displayedCount} posts`;
                     stats.style.display = 'flex';
+                    document.body.classList.add('feed-stats-visible');
                 }
 
                 // Return any pending HTTP fetches (likes mode) so caller can await them
@@ -2486,6 +2510,23 @@
                 const div = document.createElement('div');
                 div.textContent = text;
                 return div.innerHTML;
+            }
+
+            breakLongWords(text, maxLen = 60) {
+                // Split on whitespace (preserving whitespace tokens), then break
+                // any token longer than maxLen characters and mark each break point.
+                if (!text) return '';
+                const tokens = text.split(/(\s+)/);
+                return tokens.map(token => {
+                    if (/^\s+$/.test(token) || token.length <= maxLen) {
+                        return this.escapeHtml(token);
+                    }
+                    const parts = [];
+                    for (let i = 0; i < token.length; i += maxLen) {
+                        parts.push(this.escapeHtml(token.slice(i, i + maxLen)));
+                    }
+                    return parts.join('<span class="word-break-indicator">↵</span><br>');
+                }).join('');
             }
 
             extractImageUrls(images, authorDid) {
