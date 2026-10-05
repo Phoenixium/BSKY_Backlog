@@ -533,6 +533,19 @@ button:disabled {
     box-shadow: 0 0 12px rgba(29, 182, 121, 0.3);
 }
 
+.post-action-button.bookmarked {
+    color: #f0a500;
+    background-color: rgba(240, 165, 0, 0.2);
+    border-color: rgba(240, 165, 0, 0.3);
+    font-weight: 700;
+    box-shadow: 0 0 8px rgba(240, 165, 0, 0.2);
+}
+
+.post-action-button.bookmarked:hover {
+    background-color: rgba(240, 165, 0, 0.3);
+    box-shadow: 0 0 12px rgba(240, 165, 0, 0.3);
+}
+
 .post-stat-group {
     display: flex;
     align-items: center;
@@ -588,6 +601,17 @@ button:disabled {
 .post-action-button.dual-acct-btn.reposted:hover {
     background-color: rgba(29, 182, 121, 0.15);
     border-color: rgba(29, 182, 121, 0.6);
+}
+
+.post-action-button.dual-acct-btn.bookmarked {
+    border-color: rgba(240, 165, 0, 0.4);
+    color: #f0a500;
+    background-color: rgba(240, 165, 0, 0.08);
+}
+
+.post-action-button.dual-acct-btn.bookmarked:hover {
+    background-color: rgba(240, 165, 0, 0.15);
+    border-color: rgba(240, 165, 0, 0.6);
 }
 
 .skeleton {
@@ -1235,6 +1259,11 @@ button:disabled {
     border-color: #3fb950;
 }
 
+[data-theme="dark"] .post-action-button.bookmarked {
+    color: #e3b341;
+    border-color: #e3b341;
+}
+
 [data-theme="dark"] .post-action-button.dual-acct-btn {
     color: #79c0ff;
     border-color: #58a6ff;
@@ -1260,6 +1289,12 @@ button:disabled {
     color: #3fb950;
     border-color: #3fb950;
     background-color: rgba(63, 185, 80, 0.12);
+}
+
+[data-theme="dark"] .post-action-button.dual-acct-btn.bookmarked {
+    color: #e3b341;
+    border-color: #e3b341;
+    background-color: rgba(227, 179, 65, 0.12);
 }
 
 /* ── Suggested Accounts ────────────────────────────────────── */

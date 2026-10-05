@@ -29,6 +29,8 @@
                 this.userHandle = null;
                 this.refreshToken = null;
                 this.refreshInterval = null;
+                // Slot awaiting re-login after a token refresh failure (set by promptReauthForAccount)
+                this.reauthSlot = null;
                 // Multi-account support
                 this.accounts = {};
                 this.activeAccounts = [];
@@ -39,10 +41,20 @@
                 this.likedPosts_B = new Map();
                 this.repostedPosts_A = new Map();
                 this.repostedPosts_B = new Map();
+                // Bookmarks are a private per-account toggle (no shareable record URI),
+                // so they're tracked as plain URI sets rather than URI → record-URI maps.
+                this.bookmarkedPosts = new Set();
+                this.bookmarkedPosts_A = new Set();
+                this.bookmarkedPosts_B = new Set();
                 // PDS discovery cache (in-memory, per session)
                 this.pdsCache = new Map();
                 // Liked-date map: post URI → ISO date string of when the post was liked
                 this.likedAtMap = new Map();
+                // Avatar cache: author DID → last-known-good avatar URL, used to backfill
+                // posts whose author data arrived without an avatar (rate limiting, partial
+                // responses, etc.) and to fix up earlier initials placeholders once a real
+                // avatar for that author shows up later in the feed.
+                this.avatarCache = new Map();
                 // Image preloading
                 this.preloadedImages = new Set();
                 this.imagePreloadingEnabled = localStorage.getItem('imagePreloadingEnabled') !== 'false'; // true by default
@@ -55,10 +67,18 @@
                 this.accountGroupedLayout = localStorage.getItem('accountGroupedLayout') === 'true';
                 // Deduplication toggle (off by default)
                 this.deduplicatePosts = localStorage.getItem('deduplicatePosts') === 'true';
+                // Prefill target handles with logged-in accounts (off by default)
+                this.prefillTargetWithLoggedInAccounts = localStorage.getItem('prefillTargetWithLoggedInAccounts') === 'true';
+                // Video volume, persisted and applied to every rendered video
+                this.videoVolume = parseFloat(localStorage.getItem('videoVolume'));
+                if (isNaN(this.videoVolume)) this.videoVolume = 1;
+                this.videoMuted = localStorage.getItem('videoMuted') === 'true';
                 // Rate limit tracking (populated from Bluesky response headers)
                 this._rateLimitRemaining = null;
                 this._rateLimitReset = null;
                 this.setupIntersectionObserver();
+                this.setupMediaRetryHandler();
+                this.setupVideoVolumeHandler();
                 this.initializeCacheManager();
                 this.cache.init();
                 this.setDefaultDateValues();
@@ -68,6 +88,7 @@
                 this.restoreMuteBlockUI();
                 this.updateLayoutToggleButton();
                 this.updateDeduplicateButton();
+                this.updatePrefillTargetButton();
             }
 
             setDefaultDateValues() {
@@ -227,6 +248,100 @@
                 }, 100);
             }
 
+            setupMediaRetryHandler() {
+                // 'error' events from <img>/<video>/<source> don't bubble, but a capture-phase
+                // listener on document still sees them on the way down — use that to detect and
+                // auto-retry failed media loads (transient network/CDN blips) application-wide.
+                const maxRetries = 3;
+
+                document.addEventListener('error', (e) => {
+                    const el = e.target;
+                    if (!el || !el.tagName) return;
+
+                    // A <source> with no src attribute fires a synchronous, spec-mandated error —
+                    // that's expected for videos still awaiting PDS resolution (see
+                    // resolvePendingVideoSources), not a real load failure. Retrying it would just
+                    // set src to the page's own URL (resolving "" against the document base) and
+                    // fetch that. Ignore it; resolvePendingVideoSources will set the real src.
+                    if (el.tagName === 'SOURCE' && !el.hasAttribute('src')) return;
+
+                    let mediaEl = null;
+                    if (el.tagName === 'IMG') {
+                        mediaEl = el;
+                    } else if (el.tagName === 'SOURCE' && el.parentElement?.tagName === 'VIDEO') {
+                        mediaEl = el.parentElement;
+                    } else if (el.tagName === 'VIDEO') {
+                        mediaEl = el;
+                    } else {
+                        return;
+                    }
+
+                    const attempts = parseInt(mediaEl.dataset.retryCount || '0', 10);
+                    if (attempts >= maxRetries) {
+                        // Avatars get a clean initials fallback instead of a permanently broken icon;
+                        // it stays tagged with the author DID so a later good avatar can still replace it.
+                        if (mediaEl.tagName === 'IMG' && mediaEl.dataset.authorDid) {
+                            const span = document.createElement('span');
+                            span.className = 'avatar-initial-fallback';
+                            span.dataset.authorDid = mediaEl.dataset.authorDid;
+                            span.textContent = mediaEl.dataset.authorInitial || '?';
+                            mediaEl.replaceWith(span);
+                            return;
+                        }
+                        mediaEl.classList.add('media-load-failed');
+                        mediaEl.title = 'Failed to load after retries';
+                        return;
+                    }
+
+                    mediaEl.dataset.retryCount = attempts + 1;
+                    const delay = 1000 * 2 ** attempts; // 1s, 2s, 4s
+
+                    setTimeout(() => {
+                        if (mediaEl.tagName === 'IMG') {
+                            const originalSrc = mediaEl.dataset.originalSrc || mediaEl.src;
+                            mediaEl.dataset.originalSrc = originalSrc;
+                            const sep = originalSrc.includes('?') ? '&' : '?';
+                            mediaEl.src = `${originalSrc}${sep}_retry=${Date.now()}`;
+                        } else {
+                            // <video>: cache-bust each <source> then reload
+                            mediaEl.querySelectorAll('source').forEach(source => {
+                                const originalSrc = source.dataset.originalSrc || source.src;
+                                source.dataset.originalSrc = originalSrc;
+                                const sep = originalSrc.includes('?') ? '&' : '?';
+                                source.src = `${originalSrc}${sep}_retry=${Date.now()}`;
+                            });
+                            mediaEl.load();
+                        }
+                    }, delay);
+                }, true); // capture phase required for non-bubbling error events
+            }
+
+            setupVideoVolumeHandler() {
+                // 'volumechange' doesn't bubble, so use a capture-phase listener to catch it
+                // from any video and persist + propagate the chosen level to every other video.
+                document.addEventListener('volumechange', (e) => {
+                    const video = e.target;
+                    if (!video || video.tagName !== 'VIDEO') return;
+
+                    this.videoVolume = video.volume;
+                    this.videoMuted = video.muted;
+                    localStorage.setItem('videoVolume', this.videoVolume);
+                    localStorage.setItem('videoMuted', this.videoMuted);
+
+                    document.querySelectorAll('video').forEach(v => {
+                        if (v !== video) {
+                            v.volume = this.videoVolume;
+                            v.muted = this.videoMuted;
+                        }
+                    });
+                }, true);
+            }
+
+            applyVideoVolume(video) {
+                video.volume = this.videoVolume;
+                video.muted = this.videoMuted;
+            }
+
             updateStatus(message) {
                 document.getElementById('statusInfo').textContent = message;
             }
@@ -324,19 +439,22 @@
                     this.updateAuthUI();
                     this.setupTokenRefresh();
                     await this.loadInteractionState();
+                    this.prefillTargetHandlesWithLoggedInAccounts();
                 }
             }
 
             async loadInteractionState() {
-                // Load liked/reposted posts for each active account
+                // Load liked/reposted/bookmarked posts for each active account
                 for (const slot of this.activeAccounts) {
                     const likedKey = `liked:${slot}`;
                     const repostedKey = `reposted:${slot}`;
+                    const bookmarkedKey = `bookmarked:${slot}`;
                     
                     const liked = await this.cache.get(likedKey);
                     const reposted = await this.cache.get(repostedKey);
+                    const bookmarked = await this.cache.get(bookmarkedKey);
                     
-                    const { likedMap: targetMap_liked, repostedMap: targetMap_reposted } = this.getMapsForSlot(slot);
+                    const { likedMap: targetMap_liked, repostedMap: targetMap_reposted, bookmarkedSet: targetSet_bookmarked } = this.getMapsForSlot(slot);
                     
                     if (liked) {
                         Object.entries(liked).forEach(([uri, recordUri]) => {
@@ -348,11 +466,14 @@
                             targetMap_reposted.set(uri, recordUri);
                         });
                     }
+                    if (bookmarked) {
+                        bookmarked.forEach(uri => targetSet_bookmarked.add(uri));
+                    }
                 }
             }
 
             async saveInteractionState(slot) {
-                const { likedMap: targetMap_liked, repostedMap: targetMap_reposted } = this.getMapsForSlot(slot);
+                const { likedMap: targetMap_liked, repostedMap: targetMap_reposted, bookmarkedSet: targetSet_bookmarked } = this.getMapsForSlot(slot);
                 
                 const likedObj = {};
                 targetMap_liked.forEach((value, key) => {
@@ -366,9 +487,11 @@
                 
                 const likedKey = `liked:${slot}`;
                 const repostedKey = `reposted:${slot}`;
+                const bookmarkedKey = `bookmarked:${slot}`;
                 
                 await this.cache.set(likedKey, likedObj, 24 * 3600 * 1000);
                 await this.cache.set(repostedKey, repostedObj, 24 * 3600 * 1000);
+                await this.cache.set(bookmarkedKey, Array.from(targetSet_bookmarked), 24 * 3600 * 1000);
             }
 
             updateAuthUI() {
@@ -415,6 +538,17 @@
                         continue;
                     }
 
+                    const refreshed = await this.refreshAccountTokenWithRetry(slot, account);
+                    if (!refreshed) {
+                        // Leave the account, its slot, and all cached like/repost/bookmark data
+                        // untouched — only the token is stale. Just ask the user to log back in.
+                        this.promptReauthForAccount(slot);
+                    }
+                }
+            }
+
+            async refreshAccountTokenWithRetry(slot, account, maxRetries = 2) {
+                for (let attempt = 0; attempt <= maxRetries; attempt++) {
                     try {
                         const response = await fetch('https://bsky.social/xrpc/com.atproto.server.refreshSession', {
                             method: 'POST',
@@ -424,7 +558,7 @@
                         });
 
                         if (!response.ok) {
-                            throw new Error(`Token refresh failed for account ${slot}`);
+                            throw new Error(`HTTP ${response.status}`);
                         }
 
                         const data = await response.json();
@@ -444,12 +578,44 @@
                         }
 
                         console.log(`✅ Token refreshed successfully for account ${slot}`);
+                        return true;
                     } catch (error) {
-                        console.error(`Token refresh error for account ${slot}:`, error);
-                        // Deactivate this account on refresh failure
-                        await this.logoutAccount(slot);
+                        const isLastAttempt = attempt === maxRetries;
+                        console.warn(`Token refresh attempt ${attempt + 1}/${maxRetries + 1} failed for account ${slot}:`, error);
+                        if (!isLastAttempt) {
+                            await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt)); // 1s, 2s
+                        }
                     }
                 }
+                console.error(`Token refresh failed for account ${slot} after ${maxRetries + 1} attempts`);
+                return false;
+            }
+
+            promptReauthForAccount(slot) {
+                // Refresh exhausted its retries — the refresh token is likely expired/revoked.
+                // Ask the user to log back in for this exact slot without clearing anything else.
+                const account = this.accounts[slot];
+                if (!account) return;
+
+                this.updateStatus(`⚠️ Session expired for ${account.handle} — please log in again.`);
+
+                // Avoid yanking the modal back open on every 90-minute retry if the user already
+                // dismissed it for this slot; the status message above still reflects the issue.
+                if (this.reauthSlot === slot) return;
+
+                this.showLoginModal();
+
+                const handleInput = document.getElementById('loginHandle');
+                if (handleInput) handleInput.value = account.handle;
+
+                const errorDiv = document.getElementById('loginError');
+                if (errorDiv) {
+                    errorDiv.textContent = `Your session for ${account.handle} expired. Please re-enter your app password.`;
+                    errorDiv.style.display = 'block';
+                }
+
+                // Consumed by attemptLogin so re-login reuses this slot instead of adding a new one
+                this.reauthSlot = slot;
             }
 
             showLoginModal() {
@@ -502,9 +668,14 @@
                         }
                     }
 
-                    // Fetch post details
-                    const response = await fetch(`${API_BASE}/app.bsky.feed.getPostThread?uri=${encodeURIComponent(postUri)}&depth=2&height=2`, {
-                        headers: this.authToken ? { 'Authorization': `Bearer ${this.authToken}` } : {}
+                    // Fetch post details — use the authenticated endpoint (and primary account's
+                    // token) when logged in so post.viewer reflects actual like/repost/bookmark state
+                    const primarySlot = this.activeAccounts.length > 0 ? this.activeAccounts[0] : null;
+                    const primaryToken = primarySlot ? this.accounts[primarySlot]?.token : this.authToken;
+                    const threadBase = primaryToken ? 'https://bsky.social/xrpc' : API_BASE;
+
+                    const response = await this.bskyFetch(`${threadBase}/app.bsky.feed.getPostThread?uri=${encodeURIComponent(postUri)}&depth=2&height=2`, {
+                        headers: primaryToken ? { 'Authorization': `Bearer ${primaryToken}` } : {}
                     });
 
                     if (!response.ok) {
@@ -513,13 +684,43 @@
 
                     const data = await response.json();
                     const post = data.thread.post;
+                    const parentPost = data.thread.parent?.post || null;
+
+                    // Capture like/repost/bookmark state for the primary account
+                    this.extractSinglePostViewerData(post, primarySlot);
+                    if (parentPost) this.extractSinglePostViewerData(parentPost, primarySlot);
+
+                    // In multi-account mode, re-fetch with each secondary account's own token so
+                    // their like/repost/bookmark state shows accurately too (post.viewer is
+                    // scoped to whichever account's token made the request)
+                    for (let i = 1; i < this.activeAccounts.length; i++) {
+                        const slot = this.activeAccounts[i];
+                        const token = this.accounts[slot]?.token;
+                        if (!token) continue;
+
+                        try {
+                            const secResponse = await this.bskyFetch(
+                                `https://bsky.social/xrpc/app.bsky.feed.getPostThread?uri=${encodeURIComponent(postUri)}&depth=0&height=1`,
+                                { headers: { 'Authorization': `Bearer ${token}` } }
+                            );
+                            if (secResponse.ok) {
+                                const secData = await secResponse.json();
+                                this.extractSinglePostViewerData(secData.thread?.post, slot);
+                                if (secData.thread?.parent?.post) {
+                                    this.extractSinglePostViewerData(secData.thread.parent.post, slot);
+                                }
+                            }
+                        } catch (err) {
+                            console.warn(`Failed to load viewer state for account ${slot}:`, err);
+                        }
+                    }
 
                     // Reset feed state and display single post
                     this.resetFeedState();
                     // Mark post as debug post so it won't be filtered by date restrictions
                     this.allPosts = [{
                         post: post,
-                        reply: data.thread.parent ? { parent: data.thread.parent.post } : null,
+                        reply: data.thread.parent ? { parent: parentPost } : null,
                         isDebugPost: true
                     }];
                     this.followedAccounts = [{did: post.author.did, handle: post.author.handle}];
@@ -538,11 +739,33 @@
                 }
             }
 
-            async fetchPostByUri(uri) {
+            extractSinglePostViewerData(post, viewerSlot = null) {
+                // Stores like/repost/bookmark state for one postView into the right account's
+                // maps — shared by fetchPostByUri (likes mode) and the debug "Load Post" path.
+                if (!post || !post.viewer) return;
+
+                if (this.activeAccounts.length >= 2) {
+                    const resolvedViewerSlot = viewerSlot || this.activeAccounts[0];
+                    const { likedMap, repostedMap, bookmarkedSet } = this.getMapsForSlot(resolvedViewerSlot);
+                    if (post.viewer.like) likedMap.set(post.uri, post.viewer.like);
+                    if (post.viewer.repost) repostedMap.set(post.uri, post.viewer.repost);
+                    if (post.viewer.bookmarked) bookmarkedSet.add(post.uri);
+                } else if (this.activeAccounts.length === 1 || this.authToken) {
+                    const singleSlot = this.activeAccounts.length === 1 ? this.activeAccounts[0] : null;
+                    const { likedMap, repostedMap, bookmarkedSet } = this.getMapsForSlot(singleSlot);
+                    if (post.viewer.like) likedMap.set(post.uri, post.viewer.like);
+                    if (post.viewer.repost) repostedMap.set(post.uri, post.viewer.repost);
+                    if (post.viewer.bookmarked) bookmarkedSet.add(post.uri);
+                }
+            }
+
+            async fetchPostByUri(uri, attempt = 0) {
                 // Check cache first
                 if (this.postCache.has(uri)) {
                     return this.postCache.get(uri);
                 }
+
+                const maxAttempts = 3;
 
                 try {
                     // In likes mode with multiple accounts, use the viewer (non-target) account's token
@@ -578,44 +801,49 @@
                                 });
                             }
                             
-                            // Extract and track viewer data for the authenticated account
-                            if (post.viewer) {
-                                // For multi-account mode, store into the viewer (non-target) account's maps
-                                if (this.activeAccounts.length >= 2) {
-                                    const resolvedViewerSlot = viewerSlot || this.activeAccounts[0];
-                                    const { likedMap: targetMap_liked, repostedMap: targetMap_reposted } = this.getMapsForSlot(resolvedViewerSlot);
-                                    
-                                    if (post.viewer.like) {
-                                        targetMap_liked.set(post.uri, post.viewer.like);
-                                        if (this.DEBUG) console.log(`[fetchPostByUri] Added like for ${post.uri} (Account ${resolvedViewerSlot})`);
-                                    }
-                                    if (post.viewer.repost) {
-                                        targetMap_reposted.set(post.uri, post.viewer.repost);
-                                        if (this.DEBUG) console.log(`[fetchPostByUri] Added repost for ${post.uri} (Account ${resolvedViewerSlot})`);
-                                    }
-                                } else if (this.activeAccounts.length === 1 || this.authToken) {
-                                    // Single-account: store into the correct slot map (or legacy map if no slot)
-                                    const singleSlot = this.activeAccounts.length === 1 ? this.activeAccounts[0] : null;
-                                    const { likedMap, repostedMap } = this.getMapsForSlot(singleSlot);
-                                    if (post.viewer.like) {
-                                        likedMap.set(post.uri, post.viewer.like);
-                                        if (this.DEBUG) console.log(`[fetchPostByUri] Added like for ${post.uri} (Single account)`);
-                                    }
-                                    if (post.viewer.repost) {
-                                        repostedMap.set(post.uri, post.viewer.repost);
-                                        if (this.DEBUG) console.log(`[fetchPostByUri] Added repost for ${post.uri} (Single account)`);
-                                    }
-                                }
-                            }
+                            this.extractSinglePostViewerData(post, viewerSlot);
                             
                             this.postCache.set(uri, post);
                             return post;
                         }
                     }
                 } catch (error) {
-                    console.warn(`Failed to fetch post ${uri}:`, error);
+                    if (attempt < maxAttempts - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+                        return this.fetchPostByUri(uri, attempt + 1);
+                    }
+                    console.warn(`Failed to fetch post ${uri} after ${maxAttempts} attempts:`, error);
+                    return null;
                 }
+
+                // Response came back but wasn't ok/usable — retry before giving up
+                if (attempt < maxAttempts - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+                    return this.fetchPostByUri(uri, attempt + 1);
+                }
+                console.warn(`Failed to fetch post ${uri} after ${maxAttempts} attempts`);
                 return null;
+            }
+
+            async retryPostPlaceholder(uri) {
+                // Manual retry triggered from the "Failed to load post" button
+                const el = document.querySelector(`[data-post-uri="${CSS.escape(uri)}"]`);
+                if (el) el.innerHTML = '<div style="padding: 16px; color: #888;">Loading post...</div>';
+
+                const post = await this.fetchPostByUri(uri);
+                const toReplace = document.querySelector(`[data-post-uri="${CSS.escape(uri)}"]`);
+                if (!toReplace) return;
+
+                if (post) {
+                    const newEl = this.createPostElementFromData(post, {});
+                    toReplace.replaceWith(newEl);
+                    this.resolvePendingImageSources(newEl);
+                } else {
+                    toReplace.innerHTML = `<div style="padding: 16px; color: #e0245e; display: flex; align-items: center; gap: 10px;">
+                        ⚠️ Failed to load post.
+                        <button onclick="app.retryPostPlaceholder('${uri.replace(/'/g, "\\'")}')" style="padding: 4px 10px; cursor: pointer;">Retry</button>
+                    </div>`;
+                }
             }
 
             createPostElementFromData(post, item) {
@@ -630,10 +858,7 @@
                 const postDate = new Date(record.createdAt);
                 const timeAgo = this.formatTimeAgo(postDate);
                 const fullDate = postDate.toLocaleString();
-                const avatarInitial = author.handle.charAt(0).toUpperCase();
-                const avatarHtml = author.avatar
-                    ? `<img src="${author.avatar}" alt="${author.handle}">`
-                    : avatarInitial;
+                const avatarHtml = this.getAvatarHtml(author);
 
                 // Extract images (same logic as main rendering)
                 let imagesHtml = '';
@@ -650,9 +875,12 @@
                     const imageUrls = this.extractImageUrls(imagesToProcess, author.did);
                     imagesToProcess.forEach((img, index) => {
                         let imageUrl = imageUrls[index];
+                        const alt = img.alt || 'Post image';
                         if (imageUrl) {
-                            const alt = img.alt || 'Post image';
-                            imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" onclick="app.openImageModal('${imageUrl.replace(/'/g, "\\'")}', ${JSON.stringify(imageUrls).replace(/"/g, '&quot;')})" />`;
+                            imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" onclick="app.openImageModalFromEl(this)" />`;
+                        } else if (img.image?.ref?.$link) {
+                            // Author's PDS isn't known yet — resolved async, see resolvePendingImageSources
+                            imagesHtml += `<img alt="${alt}" class="post-image" data-author-did="${author.did}" data-image-cid="${img.image.ref.$link}" onclick="app.openImageModalFromEl(this)" />`;
                         }
                     });
                     imagesHtml += '</div>';
@@ -745,8 +973,9 @@
 
                     const data = await response.json();
 
-                    // Determine which slot to use
-                    let slot = accountSlot;
+                    // Determine which slot to use — reuse the slot awaiting re-auth (if any)
+                    // after a failed token refresh, so like/repost/bookmark maps aren't disturbed
+                    let slot = accountSlot || this.reauthSlot;
                     if (!slot) {
                         // First login - use 'A'
                         if (this.activeAccounts.length === 0) {
@@ -756,6 +985,7 @@
                             slot = 'B';
                         }
                     }
+                    this.reauthSlot = null;
 
                     // Store account
                     this.accounts[slot] = {
@@ -789,6 +1019,7 @@
                     }
 
                     this.updateAuthUI();
+                    this.prefillTargetHandlesWithLoggedInAccounts();
                     
                     // Show option to add second account if only one is logged in
                     if (this.activeAccounts.length === 1 && slot === 'A') {
@@ -831,6 +1062,9 @@
                 this.likedPosts_B.clear();
                 this.repostedPosts_A.clear();
                 this.repostedPosts_B.clear();
+                this.bookmarkedPosts.clear();
+                this.bookmarkedPosts_A.clear();
+                this.bookmarkedPosts_B.clear();
 
                 await this.cache.delete('auth:token');
                 await this.cache.delete('auth:did');
@@ -857,14 +1091,17 @@
                 await this.cache.delete(`auth:refresh:${slot}`);
                 await this.cache.delete(`liked:${slot}`);
                 await this.cache.delete(`reposted:${slot}`);
+                await this.cache.delete(`bookmarked:${slot}`);
 
                 // Clear interaction maps for this account
                 if (slot === 'A') {
                     this.likedPosts_A.clear();
                     this.repostedPosts_A.clear();
+                    this.bookmarkedPosts_A.clear();
                 } else if (slot === 'B') {
                     this.likedPosts_B.clear();
                     this.repostedPosts_B.clear();
+                    this.bookmarkedPosts_B.clear();
                 }
 
                 // Update primary account if this was the primary
@@ -1355,6 +1592,38 @@
                 return `${pds}/xrpc/com.atproto.sync.getBlob?did=${did}&cid=${cid}`;
             }
 
+            resolvePendingVideoSources(root) {
+                // Videos rendered before their author's PDS was known are left without a src
+                // (see the video embed block above) rather than guessing bsky.social, which
+                // 404s for posts from self-hosted/third-party PDS users. Discover the real PDS
+                // now and patch the <source> in once known.
+                root.querySelectorAll('video[data-author-did]').forEach(video => {
+                    const source = video.querySelector('source');
+                    if (!source || source.getAttribute('src')) return;
+
+                    const did = video.dataset.authorDid;
+                    const cid = video.dataset.videoCid;
+                    this.discoverPds(did).then(() => {
+                        source.src = this.getBlobUrl(did, cid);
+                        video.load();
+                    });
+                });
+            }
+
+            resolvePendingImageSources(root) {
+                // Same idea as resolvePendingVideoSources, for <img> tags built from a raw
+                // (unhydrated) image blob ref whose author's PDS wasn't cached yet at render time.
+                root.querySelectorAll('img[data-author-did][data-image-cid]').forEach(img => {
+                    if (img.getAttribute('src')) return;
+
+                    const did = img.dataset.authorDid;
+                    const cid = img.dataset.imageCid;
+                    this.discoverPds(did).then(() => {
+                        img.src = this.getBlobUrl(did, cid);
+                    });
+                });
+            }
+
             async getAllFollows(actor) {
                 const cached = await this.cache.get(`follows:${actor}`);
                 if (cached) {
@@ -1409,6 +1678,9 @@
                 const { startDate, endDate } = this.getDateRangeFromUI();
                 const filterSelect = document.getElementById('filterSelect').value;
 
+                // Accounts whose feed request failed outright (not just "no posts") get retried later
+                const failedAccounts = [];
+
                 // Load feeds in batches of 5 with delay between batches
                 for (let i = 0; i < this.followedAccounts.length; i += batchSize) {
                     const batch = this.followedAccounts.slice(i, i + batchSize);
@@ -1427,12 +1699,17 @@
 
                     results.forEach((result, index) => {
                         if (result.status === 'fulfilled' && result.value) {
-                            const { feed, cursor } = result.value;
+                            const { feed, cursor, failed } = result.value;
                             if (feed && feed.length > 0) {
                                 this.allPosts.push(...feed);
                                 const storeKey = batch[index].handle === 'handle.invalid' ? batch[index].did : batch[index].handle;
                                 this.feedCursors.set(storeKey, cursor);
                             }
+                            if (failed) {
+                                failedAccounts.push(batch[index]);
+                            }
+                        } else if (result.status === 'rejected') {
+                            failedAccounts.push(batch[index]);
                         }
                     });
 
@@ -1445,7 +1722,12 @@
                     }
                 }
 
-                // Sort once after all batches are loaded
+                // Retry accounts whose feed request failed before giving up on them
+                if (failedAccounts.length > 0) {
+                    await this.retryFailedAccountFeeds(failedAccounts, endDate, startDate, filterSelect);
+                }
+
+                // Sort once after all batches (and retries) are loaded
                 if (this.sortOrder === 'descending') {
                     this.allPosts.sort((a, b) => this.getPostDate(b) - this.getPostDate(a));
                 } else {
@@ -1461,6 +1743,45 @@
                 // Persist the viewer state so it survives page refreshes within the feed cache window
                 for (const slot of this.activeAccounts) {
                     await this.saveInteractionState(slot);
+                }
+            }
+
+            async retryFailedAccountFeeds(accounts, endDate, startDate, filterSelect, maxRounds = 2) {
+                // Re-attempt feed fetches for accounts that failed during the initial pass,
+                // with a backoff between rounds so transient outages have time to clear.
+                let pending = accounts;
+
+                for (let round = 1; round <= maxRounds && pending.length > 0; round++) {
+                    this.updateStatus(`🔁 Retrying ${pending.length} failed feed${pending.length > 1 ? 's' : ''} (attempt ${round}/${maxRounds})...`);
+                    await new Promise(resolve => setTimeout(resolve, 2000 * round));
+
+                    const stillFailing = [];
+                    for (const account of pending) {
+                        const actor = account.handle === 'handle.invalid' ? account.did : account.handle;
+                        let result;
+                        try {
+                            result = await this.getAuthorFeedWithDateRange(actor, endDate, startDate, filterSelect);
+                        } catch (error) {
+                            result = null;
+                        }
+
+                        if (result && result.feed && result.feed.length > 0) {
+                            this.allPosts.push(...result.feed);
+                            const storeKey = account.handle === 'handle.invalid' ? account.did : account.handle;
+                            this.feedCursors.set(storeKey, result.cursor);
+                        }
+                        if (!result || result.failed) {
+                            stillFailing.push(account);
+                        }
+                    }
+                    pending = stillFailing;
+                    this.updateFeedStats();
+                }
+
+                if (pending.length > 0) {
+                    const names = pending.map(a => a.handle).join(', ');
+                    console.warn(`Giving up on ${pending.length} account feed(s) after retries: ${names}`);
+                    this.updateStatus(`⚠️ Could not load feed for ${pending.length} account(s) after retries.`);
                 }
             }
 
@@ -1505,12 +1826,19 @@
                 let allFeed = [];
                 let cursor = endDate || undefined;
                 let isFirstRequest = true;
+                let failed = false;
 
                 while (cursor) {
                     const result = await this.getAuthorFeedForAccount(actor, cursor, isFirstRequest, filter, accountSlot);
                     isFirstRequest = false;
 
-                    if (!result || !result.feed || result.feed.length === 0) {
+                    if (!result) {
+                        // Request ultimately failed (after bskyFetch's own retries) — let the
+                        // caller know so it can queue this account for a later retry.
+                        failed = true;
+                        break;
+                    }
+                    if (!result.feed || result.feed.length === 0) {
                         break;
                     }
 
@@ -1526,7 +1854,8 @@
 
                 return {
                     feed: allFeed,
-                    cursor: cursor
+                    cursor: cursor,
+                    failed
                 };
             }
 
@@ -1613,7 +1942,8 @@
             getMapsForSlot(slot) {
                 return {
                     likedMap: slot === 'A' ? this.likedPosts_A : slot === 'B' ? this.likedPosts_B : this.likedPosts,
-                    repostedMap: slot === 'A' ? this.repostedPosts_A : slot === 'B' ? this.repostedPosts_B : this.repostedPosts
+                    repostedMap: slot === 'A' ? this.repostedPosts_A : slot === 'B' ? this.repostedPosts_B : this.repostedPosts,
+                    bookmarkedSet: slot === 'A' ? this.bookmarkedPosts_A : slot === 'B' ? this.bookmarkedPosts_B : this.bookmarkedPosts
                 };
             }
 
@@ -1700,7 +2030,7 @@
 
                     const token = accountSlot ? this.accounts[accountSlot]?.token : this.authToken;
                     const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-                    const endpointBase = pdsBase ? `${pdsBase}/xrpc` : 'https://bsky.social/xrpc';
+                    const initialBase = pdsBase || 'https://bsky.social';
 
                     while (true) {
                         await limiter.wait();
@@ -1712,7 +2042,12 @@
                             ...(currentCursor && { cursor: currentCursor })
                         });
 
-                        const response = await this.bskyFetch(`${endpointBase}/com.atproto.repo.listRecords?${params}`, { headers });
+                        const response = await this.bskyFetchForActor(
+                            did,
+                            base => `${base}/xrpc/com.atproto.repo.listRecords?${params}`,
+                            { headers },
+                            initialBase
+                        );
                         if (!response.ok) {
                             console.warn(`Failed to fetch likes via repo for ${actor}: HTTP ${response.status}`);
                             break;
@@ -1789,7 +2124,7 @@
                     // Also handles legacy single-account where activeAccounts may be empty
                     if (data.feed && (this.activeAccounts.length > 0 || this.authToken)) {
                         const primarySlot = this.activeAccounts.length > 0 ? this.activeAccounts[0] : null;
-                        const { likedMap: targetMap_liked, repostedMap: targetMap_reposted } = this.getMapsForSlot(primarySlot);
+                        const { likedMap: targetMap_liked, repostedMap: targetMap_reposted, bookmarkedSet: targetSet_bookmarked } = this.getMapsForSlot(primarySlot);
                         let likedCount = 0, repostedCount = 0;
                         data.feed.forEach(item => {
                             const post = item.post;
@@ -1802,6 +2137,9 @@
                                     targetMap_reposted.set(post.uri, post.viewer.repost);
                                     repostedCount++;
                                 }
+                                if (post.viewer.bookmarked) {
+                                    targetSet_bookmarked.add(post.uri);
+                                }
                             }
                             // Also capture viewer data from reply parent
                             if (item.reply && item.reply.parent && item.reply.parent.viewer) {
@@ -1813,6 +2151,9 @@
                                 if (parent.viewer.repost) {
                                     targetMap_reposted.set(parent.uri, parent.viewer.repost);
                                     repostedCount++;
+                                }
+                                if (parent.viewer.bookmarked) {
+                                    targetSet_bookmarked.add(parent.uri);
                                 }
                             }
                         });
@@ -1832,12 +2173,19 @@
                 let allFeed = [];
                 let cursor = endDate || undefined;
                 let isFirstRequest = true;
+                let failed = false;
 
                 while (cursor) {
                     const result = await this.getAuthorFeed(actor, cursor, isFirstRequest, filter, pdsBase);
                     isFirstRequest = false;
 
-                    if (!result || !result.feed || result.feed.length === 0) {
+                    if (!result) {
+                        // Request ultimately failed (after bskyFetch's own retries) — let the
+                        // caller know so it can queue this account for a later retry.
+                        failed = true;
+                        break;
+                    }
+                    if (!result.feed || result.feed.length === 0) {
                         break;
                     }
 
@@ -1855,7 +2203,8 @@
 
                 return {
                     feed: allFeed,
-                    cursor: cursor
+                    cursor: cursor,
+                    failed
                 };
             }
 
@@ -2016,13 +2365,20 @@
                         
                         // Fetch post asynchronously and track the promise
                         const fetchPromise = this.fetchPostByUri(item.uri).then(post => {
+                            const toReplace = document.querySelector(`[data-post-uri="${CSS.escape(item.uri)}"]`);
                             if (post) {
                                 // Replace placeholder with actual post
-                                const toReplace = document.querySelector(`[data-post-uri="${post.uri}"]`);
                                 if (toReplace) {
                                     const newEl = this.createPostElementFromData(post, item);
                                     toReplace.replaceWith(newEl);
+                                    this.resolvePendingImageSources(newEl);
                                 }
+                            } else if (toReplace) {
+                                // Failed even after internal retries — offer a manual retry
+                                toReplace.innerHTML = `<div style="padding: 16px; color: #e0245e; display: flex; align-items: center; gap: 10px;">
+                                    ⚠️ Failed to load post.
+                                    <button onclick="app.retryPostPlaceholder('${item.uri.replace(/'/g, "\\'")}')" style="padding: 4px 10px; cursor: pointer;">Retry</button>
+                                </div>`;
                             }
                         }).catch(err => console.warn('Failed to fetch post:', err));
                         pendingFetches.push(fetchPromise);
@@ -2047,10 +2403,7 @@
                     const postDate = new Date(record.createdAt);
                     const timeAgo = this.formatTimeAgo(postDate);
                     const fullDate = postDate.toLocaleString();
-                    const avatarInitial = author.handle.charAt(0).toUpperCase();
-                    const avatarHtml = author.avatar
-                        ? `<img src="${author.avatar}" alt="${author.handle}">`
-                        : avatarInitial;
+                    const avatarHtml = this.getAvatarHtml(author);
 
                     // Extract images from post embed (handle both direct images and recordWithMedia)
                     let imagesHtml = '';
@@ -2092,10 +2445,13 @@
                         // Create HTML with complete imageUrls array
                         imagesToProcess.forEach((img, index) => {
                             let imageUrl = imageUrls[index];
+                            const alt = img.alt || 'Post image';
                             if (imageUrl) {
-                                const alt = img.alt || 'Post image';
                                 const preloadHandler = this.imagePreloadingEnabled ? `onmouseover="app.preloadImage('${imageUrl.replace(/'/g, "\\'")}')"` : '';
-                                imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" ${preloadHandler} onclick="app.openImageModal('${imageUrl.replace(/'/g, "\\'")}', ${JSON.stringify(imageUrls).replace(/"/g, '&quot;')})" />`;
+                                imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" ${preloadHandler} onclick="app.openImageModalFromEl(this)" />`;
+                            } else if (img.image?.ref?.$link) {
+                                // Author's PDS isn't known yet — resolved async, see resolvePendingImageSources
+                                imagesHtml += `<img alt="${alt}" class="post-image" data-author-did="${author.did}" data-image-cid="${img.image.ref.$link}" onclick="app.openImageModalFromEl(this)" />`;
                             }
                         });
                         imagesHtml += '</div>';
@@ -2105,15 +2461,15 @@
                     let videoHtml = '';
                     if (record.embed && record.embed.$type === 'app.bsky.embed.video' && record.embed.video) {
                         const video = record.embed.video;
-                        let videoUrl = null;
 
                         if (video.ref && video.ref.$link) {
                             const cid = video.ref.$link;
-                            videoUrl = this.getBlobUrl(author.did, cid);
-                        }
-
-                        if (videoUrl) {
-                            videoHtml = `<div class="post-video"><video controls width="100%"><source src="${videoUrl}" type="video/mp4"></video></div>`;
+                            // The author's PDS may not be known yet — resolving it is async, so
+                            // render without a src for now and patch it in once discovered
+                            // (see resolvePendingVideoSources) instead of guessing bsky.social,
+                            // which 404s for posts from self-hosted/third-party PDS users.
+                            const srcAttr = this.pdsCache.has(author.did) ? ` src="${this.getBlobUrl(author.did, cid)}"` : '';
+                            videoHtml = `<div class="post-video"><video controls width="100%" data-author-did="${author.did}" data-video-cid="${cid}"><source${srcAttr} type="video/mp4"></video></div>`;
                         }
                     }
 
@@ -2160,10 +2516,7 @@
 
                     if (replyParentAuthor && replyParentUri && (replyParentText || replyParentImages.length > 0)) {
                         const parentDisplayName = replyParentAuthor.displayName || replyParentAuthor.handle;
-                        const parentAvatarInitial = replyParentAuthor.handle.charAt(0).toUpperCase();
-                        const parentAvatarHtml = replyParentAuthor.avatar
-                            ? `<img src="${replyParentAuthor.avatar}" alt="${replyParentAuthor.handle}">`
-                            : parentAvatarInitial;
+                        const parentAvatarHtml = this.getAvatarHtml(replyParentAuthor);
 
                         // Build parent post images HTML
                         let parentImagesHtml = '';
@@ -2337,10 +2690,7 @@
 
                     if (parentAuthor && parentUri && (parentText || parentImages.length > 0)) {
                         const parentDisplayName = parentAuthor.displayName || parentAuthor.handle;
-                        const parentAvatarInitial = parentAuthor.handle.charAt(0).toUpperCase();
-                        const parentAvatarHtml = parentAuthor.avatar
-                            ? `<img src="${parentAuthor.avatar}" alt="${parentAuthor.handle}">`
-                            : parentAvatarInitial;
+                        const parentAvatarHtml = this.getAvatarHtml(parentAuthor);
 
                         // Build parent post images HTML
                         let parentImagesHtml = '';
@@ -2416,10 +2766,11 @@
                     fragment.appendChild(postEl);
                 });
 
-                // Attach event listeners for like/repost buttons (query fragment before appending
-                // to avoid re-attaching listeners to already-rendered buttons on subsequent pages)
+                // Attach event listeners for like/repost/bookmark buttons (query fragment before
+                // appending to avoid re-attaching listeners to already-rendered buttons on subsequent pages)
                 const likeButtons = fragment.querySelectorAll('button[data-action="like"]');
                 const repostButtons = fragment.querySelectorAll('button[data-action="repost"]');
+                const bookmarkButtons = fragment.querySelectorAll('button[data-action="bookmark"]');
 
                 // Track image load requests — query fragment before appendChild so we get
                 // references before they move to the live DOM and start loading
@@ -2433,6 +2784,7 @@
 
                 // Track video metadata loads (resolves once enough data is available to play)
                 fragment.querySelectorAll('video').forEach(video => {
+                    this.applyVideoVolume(video);
                     pendingFetches.push(new Promise(resolve => {
                         if (video.readyState >= 1) { resolve(); return; }
                         video.onloadedmetadata = resolve;
@@ -2443,6 +2795,8 @@
                 });
 
                 // Append all posts at once (single DOM reflow) — images/videos begin loading now
+                this.resolvePendingVideoSources(fragment);
+                this.resolvePendingImageSources(fragment);
                 feed.appendChild(fragment);
                 
                 likeButtons.forEach(btn => {
@@ -2469,6 +2823,20 @@
                             this.toggleRepost(postUri, postCid, account);
                         } else {
                             this.toggleRepost(postUri, postCid);
+                        }
+                    });
+                });
+
+                bookmarkButtons.forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        const postUri = btn.getAttribute('data-uri');
+                        const postCid = btn.getAttribute('data-cid');
+                        const account = btn.getAttribute('data-account');
+                        if (account) {
+                            this.toggleBookmark(postUri, postCid, account);
+                        } else {
+                            this.toggleBookmark(postUri, postCid);
                         }
                     });
                 });
@@ -2512,6 +2880,44 @@
                 return div.innerHTML;
             }
 
+            getAvatarHtml(author) {
+                // Renders an avatar <img>, falling back to initials when the author has no
+                // avatar (or it previously failed to load). Remembers known-good avatar URLs
+                // per DID so later/earlier posts by the same author can be backfilled.
+                if (!author) return '?';
+
+                const initial = (author.handle || '?').charAt(0).toUpperCase();
+                let avatarUrl = author.avatar;
+
+                if (avatarUrl) {
+                    this.avatarCache.set(author.did, avatarUrl);
+                    // A real avatar showed up — fix any initials shown earlier in the feed
+                    this.backfillAvatarsForDid(author.did, avatarUrl);
+                } else {
+                    avatarUrl = this.avatarCache.get(author.did) || null;
+                }
+
+                if (avatarUrl) {
+                    return `<img src="${this.escapeHtml(avatarUrl)}" alt="${this.escapeHtml(author.handle || '')}" data-author-did="${this.escapeHtml(author.did || '')}" data-author-initial="${this.escapeHtml(initial)}">`;
+                }
+
+                return `<span class="avatar-initial-fallback" data-author-did="${this.escapeHtml(author.did || '')}">${this.escapeHtml(initial)}</span>`;
+            }
+
+            backfillAvatarsForDid(did, avatarUrl) {
+                // Swap any initials placeholders already in the DOM for this author to the
+                // real avatar now that it's known — "reload" avatars that rendered too early.
+                if (!did || !avatarUrl) return;
+                document.querySelectorAll(`.avatar-initial-fallback[data-author-did="${CSS.escape(did)}"]`).forEach(placeholder => {
+                    const img = document.createElement('img');
+                    img.src = avatarUrl;
+                    img.alt = '';
+                    img.dataset.authorDid = did;
+                    img.dataset.authorInitial = placeholder.textContent || '?';
+                    placeholder.replaceWith(img);
+                });
+            }
+
             breakLongWords(text, maxLen = 60) {
                 // Split on whitespace (preserving whitespace tokens), then break
                 // any token longer than maxLen characters and mark each break point.
@@ -2530,12 +2936,17 @@
             }
 
             extractImageUrls(images, authorDid) {
+                // Index-aligned with `images` (no filtering) so callers can pair each URL back to
+                // its source image. Raw blob refs resolve to null — not a guessed bsky.social URL —
+                // when the author's PDS isn't known yet; see resolvePendingImageSources.
                 return images.map(img => {
                     if (img.thumb) return img.thumb;
                     if (img.fullsize) return img.fullsize;
-                    if (img.image?.ref?.$link) return this.getBlobUrl(authorDid, img.image.ref.$link);
+                    if (img.image?.ref?.$link) {
+                        return this.pdsCache.has(authorDid) ? this.getBlobUrl(authorDid, img.image.ref.$link) : null;
+                    }
                     return null;
-                }).filter(Boolean);
+                });
             }
 
             async toggleLike(postUri, postCid, account = null) {
@@ -2576,18 +2987,11 @@
                             const likeUri = targetMap.get(postUri);
                             const rkey = likeUri.split('/').pop();
 
-                            const delResp = await fetch(`https://bsky.social/xrpc/com.atproto.repo.deleteRecord`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer ${accountData.token}`
-                                },
-                                body: JSON.stringify({
+                            const delResp = await this.repoRecordFetch(accountData.did, accountData.token, 'com.atproto.repo.deleteRecord', {
                                     repo: accountData.did,
                                     collection: 'app.bsky.feed.like',
                                     rkey: rkey
-                                })
-                            });
+                                });
                             if (delResp.ok) {
                                 targetMap.delete(postUri);
                             } else {
@@ -2596,13 +3000,7 @@
                             }
                         } else {
                             // Like
-                            const response = await fetch(`https://bsky.social/xrpc/com.atproto.repo.createRecord`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer ${accountData.token}`
-                                },
-                                body: JSON.stringify({
+                            const response = await this.repoRecordFetch(accountData.did, accountData.token, 'com.atproto.repo.createRecord', {
                                     repo: accountData.did,
                                     collection: 'app.bsky.feed.like',
                                     record: {
@@ -2613,8 +3011,7 @@
                                         },
                                         createdAt: new Date().toISOString()
                                     }
-                                })
-                            });
+                                });
 
                             if (response.ok) {
                                 const data = await response.json();
@@ -2661,18 +3058,11 @@
                             const likeUri = targetMap.get(postUri);
                             const rkey = likeUri.split('/').pop();
 
-                            const delResp = await fetch(`https://bsky.social/xrpc/com.atproto.repo.deleteRecord`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer ${this.authToken}`
-                                },
-                                body: JSON.stringify({
+                            const delResp = await this.repoRecordFetch(this.userDid, this.authToken, 'com.atproto.repo.deleteRecord', {
                                     repo: this.userDid,
                                     collection: 'app.bsky.feed.like',
                                     rkey: rkey
-                                })
-                            });
+                                });
                             if (delResp.ok) {
                                 targetMap.delete(postUri);
                             } else {
@@ -2681,13 +3071,7 @@
                             }
                         } else {
                             // Like
-                            const response = await fetch(`https://bsky.social/xrpc/com.atproto.repo.createRecord`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer ${this.authToken}`
-                                },
-                                body: JSON.stringify({
+                            const response = await this.repoRecordFetch(this.userDid, this.authToken, 'com.atproto.repo.createRecord', {
                                     repo: this.userDid,
                                     collection: 'app.bsky.feed.like',
                                     record: {
@@ -2698,8 +3082,7 @@
                                         },
                                         createdAt: new Date().toISOString()
                                     }
-                                })
-                            });
+                                });
 
                             if (response.ok) {
                                 const data = await response.json();
@@ -2765,18 +3148,11 @@
                             const repostUri = targetMap.get(postUri);
                             const rkey = repostUri.split('/').pop();
 
-                            const delResp = await fetch(`https://bsky.social/xrpc/com.atproto.repo.deleteRecord`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer ${accountData.token}`
-                                },
-                                body: JSON.stringify({
+                            const delResp = await this.repoRecordFetch(accountData.did, accountData.token, 'com.atproto.repo.deleteRecord', {
                                     repo: accountData.did,
                                     collection: 'app.bsky.feed.repost',
                                     rkey: rkey
-                                })
-                            });
+                                });
                             if (delResp.ok) {
                                 targetMap.delete(postUri);
                             } else {
@@ -2785,13 +3161,7 @@
                             }
                         } else {
                             // Repost
-                            const response = await fetch(`https://bsky.social/xrpc/com.atproto.repo.createRecord`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer ${accountData.token}`
-                                },
-                                body: JSON.stringify({
+                            const response = await this.repoRecordFetch(accountData.did, accountData.token, 'com.atproto.repo.createRecord', {
                                     repo: accountData.did,
                                     collection: 'app.bsky.feed.repost',
                                     record: {
@@ -2802,8 +3172,7 @@
                                         },
                                         createdAt: new Date().toISOString()
                                     }
-                                })
-                            });
+                                });
 
                             if (response.ok) {
                                 const data = await response.json();
@@ -2850,18 +3219,11 @@
                             const repostUri = targetMap.get(postUri);
                             const rkey = repostUri.split('/').pop();
 
-                            const delResp = await fetch(`https://bsky.social/xrpc/com.atproto.repo.deleteRecord`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer ${this.authToken}`
-                                },
-                                body: JSON.stringify({
+                            const delResp = await this.repoRecordFetch(this.userDid, this.authToken, 'com.atproto.repo.deleteRecord', {
                                     repo: this.userDid,
                                     collection: 'app.bsky.feed.repost',
                                     rkey: rkey
-                                })
-                            });
+                                });
                             if (delResp.ok) {
                                 targetMap.delete(postUri);
                             } else {
@@ -2870,13 +3232,7 @@
                             }
                         } else {
                             // Repost
-                            const response = await fetch(`https://bsky.social/xrpc/com.atproto.repo.createRecord`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                    'Authorization': `Bearer ${this.authToken}`
-                                },
-                                body: JSON.stringify({
+                            const response = await this.repoRecordFetch(this.userDid, this.authToken, 'com.atproto.repo.createRecord', {
                                     repo: this.userDid,
                                     collection: 'app.bsky.feed.repost',
                                     record: {
@@ -2887,8 +3243,7 @@
                                         },
                                         createdAt: new Date().toISOString()
                                     }
-                                })
-                            });
+                                });
 
                             if (response.ok) {
                                 const data = await response.json();
@@ -2917,6 +3272,82 @@
                 }
             }
 
+            async toggleBookmark(postUri, postCid, account = null) {
+                if (!this.authToken) {
+                    this.showLoginModal();
+                    return;
+                }
+
+                // Determine which account to use
+                if (!account && this.activeAccounts.length >= 2) {
+                    console.warn('Account not specified in multi-account mode');
+                    return;
+                }
+
+                // Bookmarks are a private per-account toggle (app.bsky.bookmark.*) — unlike
+                // likes/reposts there's no shareable record URI to delete, just the post URI.
+                const token = (account && this.activeAccounts.length >= 2)
+                    ? this.accounts[account]?.token
+                    : this.authToken;
+
+                if (account && this.activeAccounts.length >= 2 && !token) {
+                    console.error(`Account ${account} not found`);
+                    return;
+                }
+
+                const slot = (account && this.activeAccounts.length >= 2)
+                    ? account
+                    : (this.activeAccounts.length === 1 ? this.activeAccounts[0] : null);
+                const { bookmarkedSet: targetSet } = this.getMapsForSlot(slot);
+                const isBookmarked = targetSet.has(postUri);
+
+                const selector = account
+                    ? `button[data-action="bookmark"][data-account="${account}"][data-uri="${postUri}"]`
+                    : `button[data-action="bookmark"][data-uri="${postUri}"]`;
+                const applyBookmarkState = (active) => {
+                    document.querySelectorAll(selector).forEach(btn => {
+                        if (active) btn.classList.add('bookmarked'); else btn.classList.remove('bookmarked');
+                    });
+                };
+                applyBookmarkState(!isBookmarked); // optimistic
+
+                try {
+                    const endpoint = isBookmarked
+                        ? 'https://bsky.social/xrpc/app.bsky.bookmark.deleteBookmark'
+                        : 'https://bsky.social/xrpc/app.bsky.bookmark.createBookmark';
+                    const body = isBookmarked
+                        ? { uri: postUri }
+                        : { uri: postUri, cid: postCid };
+
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify(body)
+                    });
+
+                    if (!response.ok) {
+                        applyBookmarkState(isBookmarked); // revert
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    if (isBookmarked) {
+                        targetSet.delete(postUri);
+                    } else {
+                        targetSet.add(postUri);
+                    }
+
+                    if (slot) {
+                        await this.saveInteractionState(slot);
+                    }
+                } catch (error) {
+                    console.error(`Bookmark toggle error${account ? ` for account ${account}` : ''}:`, error);
+                    alert('Failed to update bookmark');
+                }
+            }
+
             showError(message) {
                 const feed = document.getElementById('feed');
                 const errorEl = document.createElement('div');
@@ -2933,6 +3364,8 @@
                     const isLiked_B = this.likedPosts_B.has(postUri);
                     const isReposted_A = this.repostedPosts_A.has(postUri);
                     const isReposted_B = this.repostedPosts_B.has(postUri);
+                    const isBookmarked_A = this.bookmarkedPosts_A.has(postUri);
+                    const isBookmarked_B = this.bookmarkedPosts_B.has(postUri);
                     
                     if (this.DEBUG) {
                         console.log(`[generatePostStats] Multi-account - Post ${postUri.substring(0, 30)}... - A: liked=${isLiked_A}, reposted=${isReposted_A} | B: liked=${isLiked_B}, reposted=${isReposted_B}`);
@@ -2944,6 +3377,8 @@
                         const likeBtnB = `<button class="post-action-button dual-acct-btn${isLiked_B ? ' liked' : ''}" data-action="like" data-account="B" data-uri="${postUri}" data-cid="${postCid}" title="Like as Account B">❤️ B</button>`;
                         const repostBtnA = `<button class="post-action-button dual-acct-btn${isReposted_A ? ' reposted' : ''}" data-action="repost" data-account="A" data-uri="${postUri}" data-cid="${postCid}" title="Repost as Account A">🔄 A</button>`;
                         const repostBtnB = `<button class="post-action-button dual-acct-btn${isReposted_B ? ' reposted' : ''}" data-action="repost" data-account="B" data-uri="${postUri}" data-cid="${postCid}" title="Repost as Account B">🔄 B</button>`;
+                        const bookmarkBtnA = `<button class="post-action-button dual-acct-btn${isBookmarked_A ? ' bookmarked' : ''}" data-action="bookmark" data-account="A" data-uri="${postUri}" data-cid="${postCid}" title="Bookmark as Account A">🔖 A</button>`;
+                        const bookmarkBtnB = `<button class="post-action-button dual-acct-btn${isBookmarked_B ? ' bookmarked' : ''}" data-action="bookmark" data-account="B" data-uri="${postUri}" data-cid="${postCid}" title="Bookmark as Account B">🔖 B</button>`;
                         
                         return `<div class="post-stats">
                                     <div class="post-stat-group">
@@ -2955,11 +3390,13 @@
                                         <div class="account-interaction-group">
                                             ${likeBtnA}
                                             ${repostBtnA}
+                                            ${bookmarkBtnA}
                                         </div>
                                         <div class="account-separator">|</div>
                                         <div class="account-interaction-group">
                                             ${likeBtnB}
                                             ${repostBtnB}
+                                            ${bookmarkBtnB}
                                         </div>
                                     </div>
                                 </div>`;
@@ -2973,6 +3410,10 @@
                         const repostBtnA = `<button class="post-action-button dual-acct-btn${isReposted_A ? ' reposted' : ''}" data-action="repost" data-account="A" data-uri="${postUri}" data-cid="${postCid}" title="Repost as Account A">A</button>`;
                         const repostBtnB = `<button class="post-action-button dual-acct-btn${isReposted_B ? ' reposted' : ''}" data-action="repost" data-account="B" data-uri="${postUri}" data-cid="${postCid}" title="Repost as Account B">B</button>`;
                         
+                        // Bookmark buttons
+                        const bookmarkBtnA = `<button class="post-action-button dual-acct-btn${isBookmarked_A ? ' bookmarked' : ''}" data-action="bookmark" data-account="A" data-uri="${postUri}" data-cid="${postCid}" title="Bookmark as Account A">A</button>`;
+                        const bookmarkBtnB = `<button class="post-action-button dual-acct-btn${isBookmarked_B ? ' bookmarked' : ''}" data-action="bookmark" data-account="B" data-uri="${postUri}" data-cid="${postCid}" title="Bookmark as Account B">B</button>`;
+                        
                         return `<div class="post-stats">
                                     <div class="post-stat-group">
                                         <span class="post-stat">💬 ${replyCount || 0}</span>
@@ -2993,14 +3434,23 @@
                                             ${repostBtnB}
                                         </div>
                                     </div>
+                                    <div class="post-stat-group">
+                                        <span class="post-stat">🔖</span>
+                                        <div class="stat-separator"></div>
+                                        <div class="stat-buttons">
+                                            ${bookmarkBtnA}
+                                            ${bookmarkBtnB}
+                                        </div>
+                                    </div>
                                 </div>`;
                     }
                 } else {
                     // Single account mode: use the active account's map, or legacy map as fallback
                     const singleSlot = this.activeAccounts.length === 1 ? this.activeAccounts[0] : null;
-                    const { likedMap, repostedMap } = this.getMapsForSlot(singleSlot);
+                    const { likedMap, repostedMap, bookmarkedSet } = this.getMapsForSlot(singleSlot);
                     const isLiked = likedMap.has(postUri);
                     const isReposted = repostedMap.has(postUri);
+                    const isBookmarked = bookmarkedSet.has(postUri);
                     
                     if (this.DEBUG) {
                         console.log(`[generatePostStats] Single-account - Post ${postUri.substring(0, 30)}... - liked=${isLiked}, reposted=${isReposted}`);
@@ -3014,32 +3464,93 @@
                         `<button class="post-action-button${isReposted ? ' reposted' : ''}" data-action="repost" data-uri="${postUri}" data-cid="${postCid}">🔄 <span class="repost-count" data-uri="${postUri}">${repostCount || 0}</span></button>` : 
                         `<span class="post-stat">🔄 ${repostCount || 0}</span>`;
                     
+                    const bookmarkBtn = this.authToken ?
+                        `<button class="post-action-button${isBookmarked ? ' bookmarked' : ''}" data-action="bookmark" data-uri="${postUri}" data-cid="${postCid}" title="Bookmark">🔖</button>` :
+                        '';
+                    
                     return `<div class="post-stats">
                                 <span class="post-stat">💬 ${replyCount || 0}</span>
                                 ${likeBtn}
                                 ${repostBtn}
+                                ${bookmarkBtn}
                             </div>`;
                 }
             }
 
             createRateLimiter(requestsPerSecond) {
                 const minInterval = 1000 / requestsPerSecond;
-                let lastRequestTime = 0;
+                // nextAllowedTime tracks the earliest ms the next request may fire.
+                // Updated atomically so concurrent callers each get their own slot.
+                let nextAllowedTime = 0;
 
                 return {
                     wait: async () => {
                         const now = Date.now();
-                        const timeSinceLastRequest = now - lastRequestTime;
-
-                        if (timeSinceLastRequest < minInterval) {
-                            await new Promise(resolve =>
-                                setTimeout(resolve, minInterval - timeSinceLastRequest)
-                            );
+                        const scheduled = Math.max(now, nextAllowedTime);
+                        nextAllowedTime = scheduled + minInterval;
+                        const delay = scheduled - now;
+                        if (delay > 0) {
+                            await new Promise(resolve => setTimeout(resolve, delay));
                         }
-
-                        lastRequestTime = Date.now();
                     }
                 };
+            }
+
+            async resolveRepoDeactivatedFallback(response, actorOrDid) {
+                // An account that migrated to a new PDS leaves its old host returning
+                // RepoDeactivated/RepoNotFound/RepoTakendown instead of real data. When that
+                // happens, force re-discovery of the actor's current PDS so the caller can retry.
+                if (!actorOrDid || response.ok) return null;
+
+                let body;
+                try {
+                    body = await response.clone().json();
+                } catch (error) {
+                    return null;
+                }
+                if (!['RepoDeactivated', 'RepoNotFound', 'RepoTakendown'].includes(body?.error)) return null;
+
+                let did = actorOrDid;
+                if (!did.startsWith('did:')) {
+                    did = await this.resolveHandleToDid(did);
+                    if (!did) return null;
+                }
+
+                // The cached PDS (if any) is the stale one that just failed — drop it and re-resolve
+                this.pdsCache.delete(did);
+                console.warn(`[PDS fallback] ${actorOrDid} returned ${body.error} — re-discovering current PDS`);
+                return await this.discoverPds(did);
+            }
+
+            async bskyFetchForActor(actor, buildUrl, options = {}, initialBase = 'https://bsky.social') {
+                // Like bskyFetch, but for requests scoped to a specific actor's repo: if the
+                // host reports the repo deactivated/moved, retry once against their real PDS.
+                let response = await this.bskyFetch(buildUrl(initialBase), options);
+                if (!response.ok) {
+                    const fallbackBase = await this.resolveRepoDeactivatedFallback(response, actor);
+                    if (fallbackBase && fallbackBase !== initialBase) {
+                        response = await this.bskyFetch(buildUrl(fallbackBase), options);
+                    }
+                }
+                return response;
+            }
+
+            async repoRecordFetch(did, token, procedure, body) {
+                // Creates/deletes a record in the acting account's own repo. Wrapped with the
+                // same RepoDeactivated/PDS-fallback as reads, since a user who migrated their
+                // own account to a custom PDS would otherwise fail to like/repost/bookmark too.
+                return await this.bskyFetchForActor(
+                    did,
+                    base => `${base}/xrpc/${procedure}`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify(body)
+                    }
+                );
             }
 
             // Bluesky rate limits: 3000 req / 5 min per IP on bsky.social (authenticated).
@@ -3047,7 +3558,7 @@
             // low, and automatically retries on HTTP 429.
             async bskyFetch(url, options = {}, maxRetries = 3) {
                 // Proactively pause if the server already told us quota is nearly gone
-                if (url.includes('bsky.social') &&
+                if ((url.includes('bsky.social') || url.includes('bsky.app')) &&
                     this._rateLimitRemaining !== null &&
                     this._rateLimitRemaining < 50) {
                     const waitMs = Math.max(1000, this._rateLimitReset - Date.now());
@@ -3059,7 +3570,20 @@
                 }
 
                 for (let attempt = 0; attempt <= maxRetries; attempt++) {
-                    const response = await fetch(url, options);
+                    let response;
+                    try {
+                        response = await fetch(url, options);
+                    } catch (networkError) {
+                        // Network-level failure (offline, DNS, timeout, etc.) — retry with backoff
+                        if (attempt === maxRetries) {
+                            console.warn(`[bskyFetch] Network error after ${maxRetries} retries: ${url}`, networkError);
+                            throw networkError;
+                        }
+                        const waitMs = Math.min(1000 * 2 ** attempt, 30000);
+                        this.updateStatus(`⚠️ Network error. Retrying ${attempt + 1}/${maxRetries} in ${Math.ceil(waitMs / 1000)}s...`);
+                        await new Promise(resolve => setTimeout(resolve, waitMs));
+                        continue;
+                    }
 
                     // Track server-reported quota from response headers
                     const remaining = response.headers.get('RateLimit-Remaining');
@@ -3067,27 +3591,35 @@
                     if (remaining !== null) this._rateLimitRemaining = parseInt(remaining, 10);
                     if (reset !== null) this._rateLimitReset = parseInt(reset, 10) * 1000; // Unix s → ms
 
-                    if (response.status !== 429) {
+                    // Only 429 and transient 5xx server errors are retryable
+                    const retryable = response.status === 429 || response.status >= 500;
+                    if (!retryable) {
                         return response;
                     }
 
                     if (attempt === maxRetries) {
-                        console.warn(`[bskyFetch] Still rate limited after ${maxRetries} retries: ${url}`);
+                        console.warn(`[bskyFetch] Still failing (HTTP ${response.status}) after ${maxRetries} retries: ${url}`);
                         return response;
                     }
 
-                    // Calculate wait time from response headers
-                    let waitMs = 60000; // default: 60s
-                    const retryAfter = response.headers.get('Retry-After');
-                    if (retryAfter) {
-                        waitMs = parseInt(retryAfter, 10) * 1000;
-                    } else if (reset) {
-                        waitMs = Math.max(1000, parseInt(reset, 10) * 1000 - Date.now());
+                    let waitMs;
+                    if (response.status === 429) {
+                        waitMs = 60000; // default: 60s
+                        const retryAfter = response.headers.get('Retry-After');
+                        if (retryAfter) {
+                            waitMs = parseInt(retryAfter, 10) * 1000;
+                        } else if (reset) {
+                            waitMs = Math.max(1000, parseInt(reset, 10) * 1000 - Date.now());
+                        }
+                        waitMs = Math.min(waitMs, 5 * 60 * 1000); // cap at 5 minutes
+                        this.updateStatus(`⚠️ Rate limited (429). Waiting ${Math.ceil(waitMs / 1000)}s before retry ${attempt + 1}/${maxRetries}...`);
+                    } else {
+                        // Transient server error (5xx) — short exponential backoff
+                        waitMs = Math.min(1000 * 2 ** attempt, 30000);
+                        this.updateStatus(`⚠️ Server error (${response.status}). Retrying ${attempt + 1}/${maxRetries} in ${Math.ceil(waitMs / 1000)}s...`);
                     }
-                    waitMs = Math.min(waitMs, 5 * 60 * 1000); // cap at 5 minutes
 
-                    this.updateStatus(`⚠️ Rate limited (429). Waiting ${Math.ceil(waitMs / 1000)}s before retry ${attempt + 1}/${maxRetries}...`);
-                    console.warn(`[bskyFetch] 429 on ${url} — waiting ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+                    console.warn(`[bskyFetch] ${response.status} on ${url} — waiting ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
                     await new Promise(resolve => setTimeout(resolve, waitMs));
                 }
             }
@@ -3164,7 +3696,7 @@
             extractViewerData(feed, accountSlot) {
                 if (!feed || !accountSlot) return { liked: 0, reposted: 0 };
 
-                const { likedMap: targetMap_liked, repostedMap: targetMap_reposted } = this.getMapsForSlot(accountSlot);
+                const { likedMap: targetMap_liked, repostedMap: targetMap_reposted, bookmarkedSet: targetSet_bookmarked } = this.getMapsForSlot(accountSlot);
                 let likedCount = 0, repostedCount = 0;
 
                 feed.forEach(item => {
@@ -3178,6 +3710,9 @@
                             targetMap_reposted.set(post.uri, post.viewer.repost);
                             repostedCount++;
                         }
+                        if (post.viewer.bookmarked) {
+                            targetSet_bookmarked.add(post.uri);
+                        }
                     }
                     // Also capture viewer data from reply parent
                     if (item.reply && item.reply.parent && item.reply.parent.viewer) {
@@ -3189,6 +3724,9 @@
                         if (parent.viewer.repost) {
                             targetMap_reposted.set(parent.uri, parent.viewer.repost);
                             repostedCount++;
+                        }
+                        if (parent.viewer.bookmarked) {
+                            targetSet_bookmarked.add(parent.uri);
                         }
                     }
                 });
@@ -3205,6 +3743,16 @@
                 const img = new Image();
                 img.src = imageUrl;
                 this.preloadedImages.add(imageUrl);
+            }
+
+            openImageModalFromEl(imgEl) {
+                // Reads URLs live from the DOM instead of a precomputed array, so it still works
+                // for images whose src was patched in later by resolvePendingImageSources.
+                const container = imgEl.closest('.post-images, .post-parent-images');
+                const allImages = container
+                    ? Array.from(container.querySelectorAll('img')).map(img => img.src).filter(Boolean)
+                    : [imgEl.src];
+                this.openImageModal(imgEl.src, allImages);
             }
 
             openImageModal(imageUrl, allImages = null) {
@@ -3391,6 +3939,53 @@
                     document.getElementById('feed').innerHTML = '';
                     this.renderPage();
                 }
+            }
+
+            togglePrefillTargetAccounts() {
+                this.prefillTargetWithLoggedInAccounts = !this.prefillTargetWithLoggedInAccounts;
+                localStorage.setItem('prefillTargetWithLoggedInAccounts', this.prefillTargetWithLoggedInAccounts);
+                this.updatePrefillTargetButton();
+                if (this.prefillTargetWithLoggedInAccounts) {
+                    this.prefillTargetHandlesWithLoggedInAccounts();
+                }
+            }
+
+            updatePrefillTargetButton() {
+                const btn = document.getElementById('prefillTargetToggleBtn');
+                if (btn) {
+                    btn.textContent = this.prefillTargetWithLoggedInAccounts ? '✓ Prefill with Logged-in Accounts' : '✗ Prefill with Logged-in Accounts';
+                    btn.title = this.prefillTargetWithLoggedInAccounts ? 'Click to stop prefilling target handles with logged-in accounts' : 'Click to prefill target handles with logged-in accounts';
+                }
+            }
+
+            prefillTargetHandlesWithLoggedInAccounts() {
+                if (!this.prefillTargetWithLoggedInAccounts) return;
+                if (this.activeAccounts.length === 0) return;
+
+                const handles = this.activeAccounts
+                    .map(slot => this.accounts[slot]?.handle)
+                    .filter(Boolean);
+                if (handles.length === 0) return;
+
+                const container = document.getElementById('handlesContainer');
+                if (!container) return;
+
+                const getInputs = () => Array.from(container.querySelectorAll('.handleInput'));
+                const currentValues = getInputs().map(input => input.value.trim());
+
+                handles.forEach(handle => {
+                    if (currentValues.includes(handle)) return; // already present, don't duplicate
+
+                    const emptyInput = getInputs().find(input => !input.value.trim());
+                    if (emptyInput) {
+                        emptyInput.value = handle;
+                    } else {
+                        this.addHandleInput();
+                        const inputs = getInputs();
+                        inputs[inputs.length - 1].value = handle;
+                    }
+                    currentValues.push(handle);
+                });
             }
 
             updateDeduplicateButton() {
@@ -3756,10 +4351,7 @@
                 threadViewer.innerHTML = chain.map((post, idx) => {
                     const isCurrent = post.uri === currentPostUri;
                     const author = post.author;
-                    const avatarInitial = author.handle.charAt(0).toUpperCase();
-                    const avatarHtml = author.avatar 
-                        ? `<img src="${this.escapeHtml(author.avatar)}" alt="">`
-                        : avatarInitial;
+                    const avatarHtml = this.getAvatarHtml(author);
                     
                     const text = post.record.text.substring(0, 120);
                     
