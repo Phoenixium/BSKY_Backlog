@@ -55,6 +55,7 @@
                 // responses, etc.) and to fix up earlier initials placeholders once a real
                 // avatar for that author shows up later in the feed.
                 this.avatarCache = new Map();
+                this.failedAvatarUrls = new Map();
                 // Image preloading
                 this.preloadedImages = new Set();
                 this.imagePreloadingEnabled = localStorage.getItem('imagePreloadingEnabled') !== 'false'; // true by default
@@ -76,9 +77,20 @@
                 // Rate limit tracking (populated from Bluesky response headers)
                 this._rateLimitRemaining = null;
                 this._rateLimitReset = null;
+                // DOM unloading: posts scrolled far behind the live window get collapsed into
+                // a single placeholder to cap DOM/memory growth on very long sessions. The
+                // underlying post data always stays in allPosts — only rendered DOM is unloaded.
+                this.renderedWindowStart = 0; // index into filteredPostsCache of the first still-rendered post
+                this.unloadedChunks = []; // stack of {count, height} collapsed chunks, oldest-unloaded first
+                this.unloadPlaceholderEl = null;
+                this.unloadObserver = null;
+                this.UNLOAD_THRESHOLD = 1000; // keep at least this many trailing posts rendered
+                this.UNLOAD_CHUNK = 100; // unload/restore this many posts at a time
                 this.setupIntersectionObserver();
                 this.setupMediaRetryHandler();
+                this.setupImagePreloadHandler();
                 this.setupVideoVolumeHandler();
+                this.setupVideoCleanupObserver();
                 this.initializeCacheManager();
                 this.cache.init();
                 this.setDefaultDateValues();
@@ -249,8 +261,8 @@
             }
 
             setupMediaRetryHandler() {
-                // 'error' events from <img>/<video>/<source> don't bubble, but a capture-phase
-                // listener on document still sees them on the way down — use that to detect and
+                // 'error' events from <img>/<video> don't bubble, but a capture-phase listener
+                // on document still sees them on the way down — use that to detect and
                 // auto-retry failed media loads (transient network/CDN blips) application-wide.
                 const maxRetries = 3;
 
@@ -258,18 +270,9 @@
                     const el = e.target;
                     if (!el || !el.tagName) return;
 
-                    // A <source> with no src attribute fires a synchronous, spec-mandated error —
-                    // that's expected for videos still awaiting PDS resolution (see
-                    // resolvePendingVideoSources), not a real load failure. Retrying it would just
-                    // set src to the page's own URL (resolving "" against the document base) and
-                    // fetch that. Ignore it; resolvePendingVideoSources will set the real src.
-                    if (el.tagName === 'SOURCE' && !el.hasAttribute('src')) return;
-
                     let mediaEl = null;
                     if (el.tagName === 'IMG') {
                         mediaEl = el;
-                    } else if (el.tagName === 'SOURCE' && el.parentElement?.tagName === 'VIDEO') {
-                        mediaEl = el.parentElement;
                     } else if (el.tagName === 'VIDEO') {
                         mediaEl = el;
                     } else {
@@ -278,9 +281,9 @@
 
                     const attempts = parseInt(mediaEl.dataset.retryCount || '0', 10);
                     if (attempts >= maxRetries) {
-                        // Avatars get a clean initials fallback instead of a permanently broken icon;
-                        // it stays tagged with the author DID so a later good avatar can still replace it.
                         if (mediaEl.tagName === 'IMG' && mediaEl.dataset.authorDid) {
+                            const avatarUrl = mediaEl.dataset.originalSrc || mediaEl.getAttribute('src');
+                            if (avatarUrl) this.failedAvatarUrls.set(avatarUrl, Date.now());
                             const span = document.createElement('span');
                             span.className = 'avatar-initial-fallback';
                             span.dataset.authorDid = mediaEl.dataset.authorDid;
@@ -298,18 +301,16 @@
 
                     setTimeout(() => {
                         if (mediaEl.tagName === 'IMG') {
-                            const originalSrc = mediaEl.dataset.originalSrc || mediaEl.src;
+                            const originalSrc = mediaEl.dataset.originalSrc || mediaEl.getAttribute('src');
+                            // No real src means the error came from an empty/missing attribute,
+                            // not a failed fetch — retrying would just hit this page's own URL.
+                            if (!originalSrc) return;
                             mediaEl.dataset.originalSrc = originalSrc;
                             const sep = originalSrc.includes('?') ? '&' : '?';
                             mediaEl.src = `${originalSrc}${sep}_retry=${Date.now()}`;
                         } else {
-                            // <video>: cache-bust each <source> then reload
-                            mediaEl.querySelectorAll('source').forEach(source => {
-                                const originalSrc = source.dataset.originalSrc || source.src;
-                                source.dataset.originalSrc = originalSrc;
-                                const sep = originalSrc.includes('?') ? '&' : '?';
-                                source.src = `${originalSrc}${sep}_retry=${Date.now()}`;
-                            });
+                            // <video>: plays from a local blob: object URL (see loadAndPlayVideo),
+                            // which doesn't support cache-busting query params — just reload it.
                             mediaEl.load();
                         }
                     }, delay);
@@ -340,6 +341,65 @@
             applyVideoVolume(video) {
                 video.volume = this.videoVolume;
                 video.muted = this.videoMuted;
+            }
+
+            setupVideoCleanupObserver() {
+                // Click-to-load videos are played from a blob: object URL (see loadAndPlayVideo)
+                // so they must be revoked once removed, or every feed clear/reload leaks memory.
+                // A MutationObserver on #feed catches removals from every call site (innerHTML
+                // resets, pagination, mode switches) without needing to touch each one.
+                const feed = document.getElementById('feed');
+                if (!feed) return;
+                const observer = new MutationObserver((mutations) => {
+                    for (const mutation of mutations) {
+                        mutation.removedNodes.forEach((node) => {
+                            if (node.nodeType !== Node.ELEMENT_NODE) return;
+                            const videos = node.matches('video[data-object-url]')
+                                ? [node]
+                                : node.querySelectorAll('video[data-object-url]');
+                            videos.forEach((v) => URL.revokeObjectURL(v.dataset.objectUrl));
+                        });
+                    }
+                });
+                observer.observe(feed, { childList: true, subtree: true });
+            }
+
+            async loadAndPlayVideo(placeholderEl) {
+                // Videos are only fetched on click (not preloaded with the rest of the feed).
+                // The whole blob is downloaded up front and played from a local object URL
+                // instead of streaming straight from the PDS, because com.atproto.sync.getBlob
+                // doesn't support HTTP Range requests — native <video> seeking needs the browser
+                // to be able to request arbitrary byte ranges, so without this, dragging the
+                // scrubber silently fails. A fully-downloaded blob: URL is seekable locally.
+                const container = placeholderEl.closest('.post-video');
+                if (!container || container.dataset.loading === 'true') return;
+                container.dataset.loading = 'true';
+
+                const did = container.dataset.authorDid;
+                const cid = container.dataset.videoCid;
+                placeholderEl.innerHTML = '<span class="video-status">Loading video…</span>';
+
+                try {
+                    await this.discoverPds(did);
+                    const response = await fetch(this.getBlobUrl(did, cid));
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const blob = await response.blob();
+                    const objectUrl = URL.createObjectURL(blob);
+
+                    const video = document.createElement('video');
+                    video.controls = true;
+                    video.autoplay = true;
+                    video.src = objectUrl;
+                    video.dataset.objectUrl = objectUrl;
+                    this.applyVideoVolume(video);
+
+                    container.innerHTML = '';
+                    container.appendChild(video);
+                } catch (error) {
+                    console.warn(`Video load failed for ${did}/${cid}:`, error);
+                    placeholderEl.innerHTML = '<span class="video-status video-status-error">Failed to load video — tap to retry</span>';
+                    container.dataset.loading = 'false';
+                }
             }
 
             updateStatus(message) {
@@ -939,7 +999,19 @@
                 this.isLikesMode = false;
                 this.likesTargetDid = null;
                 this.likedAtMap = new Map();
+                this.clearFeedDOM();
+            }
+
+            // Clears the feed DOM and resets the DOM-unloading window state that tracks it.
+            clearFeedDOM() {
                 document.getElementById('feed').innerHTML = '';
+                this.renderedWindowStart = 0;
+                this.unloadedChunks = [];
+                this.unloadPlaceholderEl = null;
+                if (this.unloadObserver) {
+                    this.unloadObserver.disconnect();
+                    this.unloadObserver = null;
+                }
             }
 
             async attemptLogin(accountSlot = null) {
@@ -1193,14 +1265,14 @@
                 this.sortOrder = order;
                 localStorage.setItem('sortOrder', order);
                 this.displayedCount = 0;
-                document.getElementById('feed').innerHTML = '';
+                this.clearFeedDOM();
                 this.renderPage();
             }
 
             setMode(mode) {
                 this.currentMode = mode;
                 this.displayedCount = 0;
-                document.getElementById('feed').innerHTML = '';
+                this.clearFeedDOM();
                 document.getElementById('feedStats').style.display = 'none';
                 document.body.classList.remove('feed-stats-visible');
             }
@@ -1273,7 +1345,7 @@
                     this.feedCursors = new Map();
                     this.allPosts = [];
                     this.displayedCount = 0;
-                    document.getElementById('feed').innerHTML = '';
+                    this.clearFeedDOM();
                     document.getElementById('feedStats').style.display = 'none';
                     document.body.classList.remove('feed-stats-visible');
                     
@@ -1301,7 +1373,7 @@
                 this.allPosts = [];
                 this.displayedCount = 0;
 
-                document.getElementById('feed').innerHTML = '';
+                this.clearFeedDOM();
                 document.getElementById('loadBtn').disabled = true;
 
                 try {
@@ -1592,27 +1664,9 @@
                 return `${pds}/xrpc/com.atproto.sync.getBlob?did=${did}&cid=${cid}`;
             }
 
-            resolvePendingVideoSources(root) {
-                // Videos rendered before their author's PDS was known are left without a src
-                // (see the video embed block above) rather than guessing bsky.social, which
-                // 404s for posts from self-hosted/third-party PDS users. Discover the real PDS
-                // now and patch the <source> in once known.
-                root.querySelectorAll('video[data-author-did]').forEach(video => {
-                    const source = video.querySelector('source');
-                    if (!source || source.getAttribute('src')) return;
-
-                    const did = video.dataset.authorDid;
-                    const cid = video.dataset.videoCid;
-                    this.discoverPds(did).then(() => {
-                        source.src = this.getBlobUrl(did, cid);
-                        video.load();
-                    });
-                });
-            }
-
             resolvePendingImageSources(root) {
-                // Same idea as resolvePendingVideoSources, for <img> tags built from a raw
-                // (unhydrated) image blob ref whose author's PDS wasn't cached yet at render time.
+                // <img> tags built from a raw (unhydrated) image blob ref whose author's PDS
+                // wasn't cached yet at render time get their src patched in once it resolves.
                 root.querySelectorAll('img[data-author-did][data-image-cid]').forEach(img => {
                     if (img.getAttribute('src')) return;
 
@@ -1620,6 +1674,9 @@
                     const cid = img.dataset.imageCid;
                     this.discoverPds(did).then(() => {
                         img.src = this.getBlobUrl(did, cid);
+                        if (this.imagePreloadingEnabled && img.matches(':hover')) {
+                            this.preloadImage(img.src);
+                        }
                     });
                 });
             }
@@ -2263,12 +2320,22 @@
                 if (el) el.style.display = 'none';
             }
 
-            renderPage() {
+            // options.items: render exactly these items instead of slicing from displayedCount
+            //   (used by restoreOldPosts() to re-insert a previously-unloaded chunk).
+            // options.insertBefore: insert before this node instead of appending to the feed end.
+            // options.updateState: when false, skip displayedCount/stats updates and unloading
+            //   (the caller is restoring already-counted posts, not loading new ones).
+            renderPage(options = {}) {
                 const feed = document.getElementById('feed');
 
                 // Get startDate from input
                 const startDateInput = document.getElementById('startDateInput').value;
                 const startDate = startDateInput ? new Date(startDateInput).toISOString() : null;
+
+                let newPosts;
+                if (options.items) {
+                    newPosts = options.items;
+                } else {
                 const filterKey = this.getFilterCacheKey();
 
                 // Only filter if params changed
@@ -2336,7 +2403,8 @@
                     );
                 }
 
-                const newPosts = filteredPosts.slice(this.displayedCount, this.displayedCount + this.postsPerPage);
+                newPosts = filteredPosts.slice(this.displayedCount, this.displayedCount + this.postsPerPage);
+                }
 
                 // Collect async fetch promises for likes mode so caller can await them
                 const pendingFetches = [];
@@ -2345,7 +2413,7 @@
                 const fragment = document.createDocumentFragment();
 
                 // Prepend a batch-loading divider before the first post of every batch after the first
-                if (this.displayedCount > 0) {
+                if (!options.items && this.displayedCount > 0) {
                     const divider = document.createElement('div');
                     divider.className = 'batch-divider batch-divider--loading';
                     divider.innerHTML = '<span class="batch-divider-spinner"></span><span class="batch-divider-label">Loading next batch…</span>';
@@ -2428,8 +2496,11 @@
                             imagesToProcess = [{ thumb: externalUri, alt: externalDesc }];
                         } else {
                             // Show as clickable card with thumbnail linking to external URL
+                            // Omit the <img> entirely when there's no thumbnail — src="" would
+                            // resolve to the page's own URL and fire a spurious load error.
+                            const thumbImgHtml = externalThumb ? `<img src="${externalThumb}" alt="${this.escapeHtml(externalDesc)}">` : '';
                             imagesHtml = `<div class="post-external-link" onclick="window.open('${externalUri.replace(/'/g, "\\'")}', '_blank')">
-                                <img src="${externalThumb || ''}" alt="${this.escapeHtml(externalDesc)}">
+                                ${thumbImgHtml}
                                 <div class="post-external-link-info">
                                     <div class="post-external-link-title">${this.escapeHtml(externalTitle)}</div>
                                     <div class="post-external-link-domain">${this.escapeHtml(externalUri.replace(/https?:\/\/(www\.)?/, '').split('/')[0])}</div>
@@ -2447,8 +2518,7 @@
                             let imageUrl = imageUrls[index];
                             const alt = img.alt || 'Post image';
                             if (imageUrl) {
-                                const preloadHandler = this.imagePreloadingEnabled ? `onmouseover="app.preloadImage('${imageUrl.replace(/'/g, "\\'")}')"` : '';
-                                imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" ${preloadHandler} onclick="app.openImageModalFromEl(this)" />`;
+                                imagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-image" onclick="app.openImageModalFromEl(this)" />`;
                             } else if (img.image?.ref?.$link) {
                                 // Author's PDS isn't known yet — resolved async, see resolvePendingImageSources
                                 imagesHtml += `<img alt="${alt}" class="post-image" data-author-did="${author.did}" data-image-cid="${img.image.ref.$link}" onclick="app.openImageModalFromEl(this)" />`;
@@ -2464,18 +2534,21 @@
 
                         if (video.ref && video.ref.$link) {
                             const cid = video.ref.$link;
-                            // The author's PDS may not be known yet — resolving it is async, so
-                            // render without a src for now and patch it in once discovered
-                            // (see resolvePendingVideoSources) instead of guessing bsky.social,
-                            // which 404s for posts from self-hosted/third-party PDS users.
-                            const srcAttr = this.pdsCache.has(author.did) ? ` src="${this.getBlobUrl(author.did, cid)}"` : '';
-                            videoHtml = `<div class="post-video"><video controls width="100%" data-author-did="${author.did}" data-video-cid="${cid}"><source${srcAttr} type="video/mp4"></video></div>`;
+                            // The hydrated view (as opposed to the raw record) carries a CDN
+                            // thumbnail — cheap to show up front, unlike the video itself.
+                            const thumbUrl = post.embed && post.embed.$type === 'app.bsky.embed.video#view' ? post.embed.thumbnail : null;
+                            const thumbStyle = thumbUrl ? ` style="background-image: url('${this.escapeHtml(thumbUrl)}'); background-size: cover; background-position: center;"` : '';
+                            // Not fetched until the user clicks (see loadAndPlayVideo) — PDS
+                            // discovery and the blob download both happen on demand instead of
+                            // preloading every video in the feed up front.
+                            videoHtml = `<div class="post-video" data-author-did="${author.did}" data-video-cid="${cid}"><div class="video-placeholder"${thumbStyle} onclick="app.loadAndPlayVideo(this)"><span class="video-play-btn">▶</span></div></div>`;
                         }
                     }
 
                     // Check for reply and build parent post card
                     let replyParentPostHtml = '';
                     let replyParentAuthor, replyParentText, replyParentUri, replyParentTime, replyParentFullDate, replyParentImages = [];
+                    let replyParentVideoHtml = '';
                     let replyParentStats = { likes: 0, replies: 0, reposts: 0 };
                     let replyParentCid = '';
 
@@ -2512,9 +2585,27 @@
                                 replyParentImages = [{ thumb: externalUri, fullsize: externalUri, alt: replyParent.embed.external.description || 'Media' }];
                             }
                         }
+
+                        const parentRecordEmbed = replyParent.record && replyParent.record.embed;
+                        const parentVideo = parentRecordEmbed && parentRecordEmbed.$type === 'app.bsky.embed.video'
+                            ? parentRecordEmbed.video
+                            : parentRecordEmbed && parentRecordEmbed.$type === 'app.bsky.embed.recordWithMedia' && parentRecordEmbed.media
+                                ? parentRecordEmbed.media.video
+                                : null;
+                        const parentVideoCid = parentVideo && parentVideo.ref && parentVideo.ref.$link;
+                        if (parentVideoCid) {
+                            const parentVideoView = replyParent.embed && replyParent.embed.$type === 'app.bsky.embed.video#view'
+                                ? replyParent.embed
+                                : replyParent.embed && replyParent.embed.$type === 'app.bsky.embed.recordWithMedia#view'
+                                    ? replyParent.embed.media
+                                    : null;
+                            const parentThumbUrl = parentVideoView && parentVideoView.thumbnail;
+                            const parentThumbStyle = parentThumbUrl ? ` style="background-image: url('${this.escapeHtml(parentThumbUrl)}'); background-size: cover; background-position: center;"` : '';
+                            replyParentVideoHtml = `<div class="post-video" data-author-did="${replyParentAuthor.did}" data-video-cid="${parentVideoCid}"><div class="video-placeholder"${parentThumbStyle} onclick="app.loadAndPlayVideo(this)"><span class="video-play-btn">▶</span></div></div>`;
+                        }
                     }
 
-                    if (replyParentAuthor && replyParentUri && (replyParentText || replyParentImages.length > 0)) {
+                    if (replyParentAuthor && replyParentUri && (replyParentText || replyParentImages.length > 0 || replyParentVideoHtml)) {
                         const parentDisplayName = replyParentAuthor.displayName || replyParentAuthor.handle;
                         const parentAvatarHtml = this.getAvatarHtml(replyParentAuthor);
 
@@ -2553,6 +2644,7 @@
                                         <div class="post-parent-text">${replyParentText}</div>
                                           </a>
                                         ${parentImagesHtml}
+                                        ${replyParentVideoHtml}
                                         ${this.generatePostStats(replyParentUri, replyParentCid, replyParentStats.replies, replyParentStats.likes, replyParentStats.reposts)}
                                     </div>
                                 </div>
@@ -2698,12 +2790,13 @@
                             parentImagesHtml = '<div class="post-parent-images">';
                             // Collect all image URLs
                             const quoteImageUrls = this.extractImageUrls(parentImages, parentAuthor.did);
-                            // Create HTML with complete quoteImageUrls array
                             parentImages.forEach((img, index) => {
                                 let imageUrl = quoteImageUrls[index];
+                                const alt = this.escapeHtml(img.alt || 'Parent post image').replace(/"/g, '&quot;');
                                 if (imageUrl) {
-                                    const alt = img.alt || 'Parent post image';
-                                    parentImagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-parent-image" onclick="app.openImageModal('${imageUrl.replace(/'/g, "\\'")}', ${JSON.stringify(quoteImageUrls).replace(/"/g, '&quot;')})" />`;
+                                    parentImagesHtml += `<img src="${imageUrl}" alt="${alt}" class="post-parent-image" onclick="app.openImageModalFromEl(this)" />`;
+                                } else if (img.image?.ref?.$link) {
+                                    parentImagesHtml += `<img alt="${alt}" class="post-parent-image" data-author-did="${parentAuthor.did}" data-image-cid="${img.image.ref.$link}" onclick="app.openImageModalFromEl(this)" />`;
                                 }
                             });
                             parentImagesHtml += '</div>';
@@ -2782,22 +2875,15 @@
                     }));
                 });
 
-                // Track video metadata loads (resolves once enough data is available to play)
-                fragment.querySelectorAll('video').forEach(video => {
-                    this.applyVideoVolume(video);
-                    pendingFetches.push(new Promise(resolve => {
-                        if (video.readyState >= 1) { resolve(); return; }
-                        video.onloadedmetadata = resolve;
-                        video.onerror = resolve;
-                        // Safety timeout: don't block forever if browser defers video loading
-                        setTimeout(resolve, 5000);
-                    }));
-                });
+                // Videos are click-to-load (see loadAndPlayVideo) so there's nothing to wait on here.
 
-                // Append all posts at once (single DOM reflow) — images/videos begin loading now
-                this.resolvePendingVideoSources(fragment);
+                // Append all posts at once (single DOM reflow) — images begin loading now
                 this.resolvePendingImageSources(fragment);
-                feed.appendChild(fragment);
+                if (options.insertBefore) {
+                    options.insertBefore.before(fragment);
+                } else {
+                    feed.appendChild(fragment);
+                }
                 
                 likeButtons.forEach(btn => {
                     btn.addEventListener('click', (e) => {
@@ -2841,6 +2927,7 @@
                     });
                 });
 
+                if (options.updateState !== false) {
                 this.displayedCount += newPosts.length;
 
                 // Update stats with filtered count (uses filteredPostsCache so dedup is reflected)
@@ -2856,8 +2943,87 @@
                     document.body.classList.add('feed-stats-visible');
                 }
 
+                // Collapse posts far behind the live window now that a new batch has landed
+                this.unloadOldPosts();
+                }
+
                 // Return any pending HTTP fetches (likes mode) so caller can await them
                 return pendingFetches;
+            }
+
+            // Collapses posts at the front of the live window into a lightweight placeholder
+            // once more than UNLOAD_THRESHOLD posts behind the newest batch are still rendered.
+            // The placeholder is sized to match the removed content's height so scroll position
+            // doesn't jump; the underlying post data stays in allPosts/filteredPostsCache.
+            unloadOldPosts() {
+                const feed = document.getElementById('feed');
+
+                while ((this.displayedCount - this.renderedWindowStart) > (this.UNLOAD_THRESHOLD + this.UNLOAD_CHUNK)) {
+                    const startNode = this.unloadPlaceholderEl ? this.unloadPlaceholderEl.nextSibling : feed.firstChild;
+                    if (!startNode) break;
+
+                    let node = startNode;
+                    let lastNode = null;
+                    let removedCount = 0;
+                    while (node && removedCount < this.UNLOAD_CHUNK) {
+                        lastNode = node;
+                        if (node.classList && node.classList.contains('post')) removedCount++;
+                        node = node.nextSibling;
+                    }
+                    if (!lastNode || removedCount === 0) break;
+
+                    const top = startNode.getBoundingClientRect().top;
+                    const bottom = lastNode.getBoundingClientRect().bottom;
+                    const height = Math.max(0, bottom - top);
+
+                    let cur = startNode;
+                    while (cur) {
+                        const next = cur.nextSibling;
+                        const isLast = cur === lastNode;
+                        cur.remove();
+                        cur = isLast ? null : next;
+                    }
+
+                    if (!this.unloadPlaceholderEl) {
+                        const ph = document.createElement('div');
+                        ph.className = 'unloaded-posts-placeholder';
+                        feed.insertBefore(ph, feed.firstChild);
+                        this.unloadPlaceholderEl = ph;
+                        this.unloadObserver = new IntersectionObserver((entries) => {
+                            if (entries[0].isIntersecting) this.restoreOldPosts();
+                        }, { root: null, rootMargin: '800px 0px 0px 0px', threshold: 0 });
+                        this.unloadObserver.observe(ph);
+                    }
+                    const prevHeight = parseFloat(this.unloadPlaceholderEl.style.minHeight) || 0;
+                    this.unloadPlaceholderEl.style.minHeight = `${prevHeight + height}px`;
+                    this.unloadedChunks.push({ count: removedCount, height });
+                    this.renderedWindowStart += removedCount;
+                }
+            }
+
+            // Re-renders the most recently unloaded chunk (LIFO — it's the one immediately
+            // behind the current live window) when the user scrolls back up near the placeholder.
+            restoreOldPosts() {
+                if (!this.unloadPlaceholderEl || this.unloadedChunks.length === 0) return;
+
+                const chunk = this.unloadedChunks.pop();
+                const startIdx = this.renderedWindowStart - chunk.count;
+                const filteredPosts = this.filteredPostsCache || [];
+                const items = filteredPosts.slice(startIdx, this.renderedWindowStart);
+                const insertBefore = this.unloadPlaceholderEl.nextSibling;
+
+                this.renderPage({ items, insertBefore, updateState: false });
+                this.renderedWindowStart = startIdx;
+
+                if (this.unloadedChunks.length === 0) {
+                    this.unloadObserver.disconnect();
+                    this.unloadObserver = null;
+                    this.unloadPlaceholderEl.remove();
+                    this.unloadPlaceholderEl = null;
+                } else {
+                    const prevHeight = parseFloat(this.unloadPlaceholderEl.style.minHeight) || 0;
+                    this.unloadPlaceholderEl.style.minHeight = `${Math.max(0, prevHeight - chunk.height)}px`;
+                }
             }
 
             formatTimeAgo(date) {
@@ -2892,16 +3058,26 @@
                 if (avatarUrl) {
                     this.avatarCache.set(author.did, avatarUrl);
                     // A real avatar showed up — fix any initials shown earlier in the feed
-                    this.backfillAvatarsForDid(author.did, avatarUrl);
+                    if (!this.isAvatarUrlCoolingDown(avatarUrl)) {
+                        this.backfillAvatarsForDid(author.did, avatarUrl);
+                    }
                 } else {
                     avatarUrl = this.avatarCache.get(author.did) || null;
                 }
 
-                if (avatarUrl) {
+                if (avatarUrl && !this.isAvatarUrlCoolingDown(avatarUrl)) {
                     return `<img src="${this.escapeHtml(avatarUrl)}" alt="${this.escapeHtml(author.handle || '')}" data-author-did="${this.escapeHtml(author.did || '')}" data-author-initial="${this.escapeHtml(initial)}">`;
                 }
 
                 return `<span class="avatar-initial-fallback" data-author-did="${this.escapeHtml(author.did || '')}">${this.escapeHtml(initial)}</span>`;
+            }
+
+            isAvatarUrlCoolingDown(avatarUrl) {
+                const failedAt = this.failedAvatarUrls.get(avatarUrl);
+                if (!failedAt) return false;
+                if (Date.now() - failedAt < 60000) return true;
+                this.failedAvatarUrls.delete(avatarUrl);
+                return false;
             }
 
             backfillAvatarsForDid(did, avatarUrl) {
@@ -3734,15 +3910,24 @@
                 return { liked: likedCount, reposted: repostedCount };
             }
 
+            setupImagePreloadHandler() {
+                document.addEventListener('mouseover', (event) => {
+                    const img = event.target;
+                    if (!this.imagePreloadingEnabled || !(img instanceof HTMLImageElement) ||
+                        !img.matches('.post-image, .post-parent-image') || !img.getAttribute('src')) return;
+                    this.preloadImage(img.currentSrc || img.src);
+                });
+            }
+
             preloadImage(imageUrl) {
-                // Preload image when user hovers over it
-                if (this.preloadedImages.has(imageUrl)) {
+                if (!this.imagePreloadingEnabled || !imageUrl || this.preloadedImages.has(imageUrl)) {
                     return; // Already preloaded
                 }
 
                 const img = new Image();
-                img.src = imageUrl;
+                img.onerror = () => this.preloadedImages.delete(imageUrl);
                 this.preloadedImages.add(imageUrl);
+                img.src = imageUrl;
             }
 
             openImageModalFromEl(imgEl) {
@@ -3896,7 +4081,7 @@
                 } else if (this.allPosts.length > 0) {
                     // Re-render feed when toggled
                     this.displayedCount = 0;
-                    document.getElementById('feed').innerHTML = '';
+                    this.clearFeedDOM();
                     this.renderPage();
                 }
             }
@@ -3917,7 +4102,7 @@
                 // Re-render feed when toggled
                 if (this.allPosts.length > 0) {
                     this.displayedCount = 0;
-                    document.getElementById('feed').innerHTML = '';
+                    this.clearFeedDOM();
                     this.renderPage();
                 }
             }
@@ -3936,7 +4121,7 @@
                 this.updateDeduplicateButton();
                 if (this.allPosts.length > 0) {
                     this.displayedCount = 0;
-                    document.getElementById('feed').innerHTML = '';
+                    this.clearFeedDOM();
                     this.renderPage();
                 }
             }
@@ -4081,7 +4266,7 @@
                     // Re-render feed with filtering applied
                     if (this.allPosts.length > 0) {
                         this.displayedCount = 0;
-                        document.getElementById('feed').innerHTML = '';
+                        this.clearFeedDOM();
                         this.renderPage();
                     }
                 } catch (error) {
@@ -4154,6 +4339,26 @@
                             post.style.backgroundColor = '';
                         }, 2000);
                         return;
+                    }
+                }
+
+                // If the post is hidden behind the unloaded-posts placeholder, restore chunks
+                // (undoing unloadOldPosts()) until it's back in the DOM
+                if (this.unloadPlaceholderEl && this.filteredPostsCache) {
+                    const idxInFiltered = this.filteredPostsCache.findIndex(item => item.post && item.post.uri === postUri);
+                    if (idxInFiltered !== -1 && idxInFiltered < this.renderedWindowStart) {
+                        while (this.unloadedChunks.length > 0 && idxInFiltered < this.renderedWindowStart) {
+                            this.restoreOldPosts();
+                        }
+                        const restoredEl = document.querySelector(`[data-post-uri="${CSS.escape(postUri)}"]`);
+                        if (restoredEl) {
+                            restoredEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            restoredEl.style.backgroundColor = '#fff3cd';
+                            setTimeout(() => {
+                                restoredEl.style.backgroundColor = '';
+                            }, 2000);
+                            return;
+                        }
                     }
                 }
 

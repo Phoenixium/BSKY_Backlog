@@ -474,6 +474,44 @@ button:disabled {
     cursor: pointer;
 }
 
+.video-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 220px;
+    border-radius: 8px;
+    background-color: #000;
+    cursor: pointer;
+}
+
+.video-play-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background-color: rgba(255, 255, 255, 0.15);
+    color: #fff;
+    font-size: 22px;
+    padding-left: 4px; /* optically center the glyph inside the circle */
+}
+
+.video-placeholder:hover .video-play-btn {
+    background-color: rgba(255, 255, 255, 0.3);
+}
+
+.video-status {
+    color: #fff;
+    font-size: 14px;
+}
+
+.video-status-error {
+    color: #f87171;
+}
+
+
 .post-stats {
     display: flex;
     gap: 20px;
@@ -1771,4 +1809,13 @@ button:disabled {
 [data-theme="dark"] .batch-divider--done::before,
 [data-theme="dark"] .batch-divider--done::after {
     border-color: #21262d;
+}
+
+/* Placeholder standing in for posts unloaded from the DOM (see unloadOldPosts() in
+   app.js) — sized via inline minHeight to match the removed content so scroll
+   position doesn't jump. It's re-expanded automatically when scrolled near. */
+.unloaded-posts-placeholder {
+    width: 100%;
+    box-sizing: border-box;
+    pointer-events: none;
 }
